@@ -1,0 +1,2 @@
+k label node ip-10-0-130-165.ec2.internal run.ai/swap-enabled=true
+k label node ip-10-0-106-121.ec2.internal run.ai/swap-enabled=true
