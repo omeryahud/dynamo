@@ -1,0 +1,127 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-1
+  namespace: swap
+  labels:
+    runai/queue: swap
+spec:
+  services:
+
+    Frontend:
+      labels:
+        runai/queue: swap
+      componentType: frontend
+      extraPodMetadata:
+        labels:
+          runai/queue: swap
+      replicas: 1
+      envs:
+        # Enable KV-aware routing mode - Frontend will use Router for request routing
+        - name: DYN_ROUTER_MODE
+          value: kv
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          name: ""
+          resources: {}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+        schedulerName: runai-scheduler
+        securityContext:
+          seccompProfile:
+            type: RuntimeDefault
+
+    Router:
+      labels:
+        runai/queue: swap
+      componentType: router
+      replicas: 1
+      extraPodMetadata:
+        labels:
+          runai/queue: swap
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          name: ""
+          command:
+          - python3
+          - -m
+          - dynamo.router
+          # - dynamo.swap_aware_router
+          args:
+          - --endpoint
+          - dynamo.vllm.generate
+          # - --swap-aware-routing
+          # - --swap-coordinator-url
+          # - http://swap-coordinator-service:8080
+          resources: {}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+        schedulerName: runai-scheduler
+        securityContext:
+          seccompProfile:
+            type: RuntimeDefault
+
+    vLLMWorker:
+      labels:
+        runai/queue: swap
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 2
+      extraPodMetadata:
+        annotations:
+          gpu-fraction: "0.5"
+      extraPodSpec:
+        mainContainer:
+          env:
+          - name: VLLM_ENGINE_ITERATION_TIMEOUT_S
+            value: "120"
+          - name: RUNAI_GPU_MEMORY_LIMIT
+            value: "1.0"
+          - name: RUNAI_SWAP_MAX_BLOCK_SIZE_MB
+            value: "512"
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          name: ""
+          workingDir: /workspace/
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          # - --publish-events-and-metrics
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+        nodeSelector:                                                                                                                                                   
+          run.ai/swap-enabled: 'true'
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/selector: qwen3-1-vllmworker
+              topologyKey: kubernetes.io/hostname
+        schedulerName: runai-scheduler
+        securityContext:
+          seccompProfile:
+            type: RuntimeDefault
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        volumes:                                                                                                                                                        
+        - emptyDir: {}                                                                                                                                                  
+          name: triton-cache

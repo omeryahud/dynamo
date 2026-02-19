@@ -1,0 +1,141 @@
+apiVersion: engine.run.ai/v1alpha1
+kind: Config
+metadata:
+  name: engine-config
+spec:
+  global:
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - preference:
+            matchExpressions:
+            - key: node-role.kubernetes.io/runai-system
+              operator: Exists
+          weight: 1
+    core:
+      features:
+        swap:
+          biDirectional:
+            enabled: true
+          enabled: true
+          limits:
+            cpuRam: 32G
+            reservedGpuRam: 2G
+    imagesPullSecret: runai-reg-creds
+  namespace: runai-engine
+---
+apiVersion: engine.run.ai/v1alpha1
+kind: SchedulingShard
+metadata:
+  name: default
+---
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  name: default
+spec:
+  resources:
+    cpu:
+      quota: -1
+      limit: -1
+      overQuotaWeight: 1
+    gpu:
+      quota: -1
+      limit: -1
+      overQuotaWeight: 1
+    memory:
+      quota: -1
+      limit: -1
+      overQuotaWeight: 1
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    kubernetes.io/metadata.name: swap
+    runai/namespace-version: v2
+    runai/queue: swap
+  name: swap
+spec:
+  finalizers:
+    - kubernetes
+---
+apiVersion: scheduling.run.ai/v2
+kind: Queue
+metadata:
+  labels:
+    project: swap
+  name: swap
+spec:
+  parentQueue: default
+  resources:
+    cpu:
+      quota: -1
+      limit: -1
+      overQuotaWeight: 1
+    gpu:
+      quota: 1
+      limit: -1
+      overQuotaWeight: 1
+    memory:
+      quota: -1
+      limit: -1
+      overQuotaWeight: 1
+---
+apiVersion: v1
+items:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: runai-binder-project
+      namespace: swap
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: runai-binder-project
+    subjects:
+      - kind: ServiceAccount
+        name: binder
+        namespace: runai-engine
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: runai-scheduler-rw
+      namespace: swap
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: runai-scheduler-rw
+    subjects:
+      - kind: ServiceAccount
+        name: runai-scheduler
+        namespace: runai-engine
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: runai-pod-group-controller
+      namespace: swap
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: pod-group-controller
+    subjects:
+      - kind: ServiceAccount
+        name: pod-group-controller
+        namespace: runai-engine
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: engine-admission-project
+      namespace: swap
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: runai-engine-admission-project
+    subjects:
+      - kind: ServiceAccount
+        name: engine-admission
+        namespace: runai-engine
+kind: List
+metadata:
+  resourceVersion: ""
