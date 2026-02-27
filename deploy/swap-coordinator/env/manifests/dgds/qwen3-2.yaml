@@ -23,6 +23,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: dynamo:latest-vllm-runtime
+          imagePullPolicy: Never
           name: ""
           resources: {}
           securityContext:
@@ -46,6 +47,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: dynamo:latest-vllm-runtime
+          imagePullPolicy: Never
           name: ""
           command:
           - python3
@@ -88,6 +90,7 @@ spec:
           - name: RUNAI_SWAP_MAX_BLOCK_SIZE_MB
             value: "512"
           image: dynamo:latest-vllm-runtime
+          imagePullPolicy: Never
           name: ""
           workingDir: /workspace/
           command:
