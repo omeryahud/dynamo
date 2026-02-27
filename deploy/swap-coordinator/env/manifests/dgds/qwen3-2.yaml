@@ -22,7 +22,7 @@ spec:
           value: kv
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          image: dynamo:latest-vllm-runtime
           name: ""
           resources: {}
           securityContext:
@@ -45,7 +45,7 @@ spec:
           runai/queue: swap
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          image: dynamo:latest-vllm-runtime
           name: ""
           command:
           - python3
@@ -87,7 +87,7 @@ spec:
             value: "1.0"
           - name: RUNAI_SWAP_MAX_BLOCK_SIZE_MB
             value: "512"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0
+          image: dynamo:latest-vllm-runtime
           name: ""
           workingDir: /workspace/
           command:
