@@ -54,14 +54,14 @@ spec:
           command:
           - python3
           - -m
-          - dynamo.router
-          # - dynamo.swap_aware_router
+          # - dynamo.router
+          - dynamo.swap_aware_router
           args:
           - --endpoint
           - dynamo.vllm.generate
-          # - --swap-aware-routing
-          # - --swap-coordinator-url
-          # - http://swap-coordinator-service:8080
+          - --swap-aware-routing
+          - --swap-coordinator-url
+          - http://swap-coordinator-service:8080
           resources: {}
           securityContext:
             allowPrivilegeEscalation: false
