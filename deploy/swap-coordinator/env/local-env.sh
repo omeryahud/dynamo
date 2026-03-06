@@ -8,68 +8,61 @@ trap 'echo "Cleaning up..."; kill 0' EXIT
 export PYTHONHASHSEED=0
 
 MODEL="Qwen/Qwen3-0.6B"
-BLOCK_SIZE=64
 SWAP_COORDINATOR_PORT=8080
-
-# Namespace used by the router (frontend-visible)
-ROUTER_NAMESPACE="dynamo"
-# Namespace used by the backend workers (not directly visible to the frontend)
-WORKER_NAMESPACE="backend"
+ROUTER_NAMESPACE="dynamo"   # namespace the router registers in (frontend-visible)
+WORKER_NAMESPACE="backend"  # namespace the workers run in (not visible to frontend)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SWAP_COORDINATOR_DIR="$SCRIPT_DIR/.."
 
-# Start etcd
-docker stop etcd 2>/dev/null || true
-docker rm etcd 2>/dev/null || true
-docker run -d --name etcd \
-    -p 2379:2379 \
-    quay.io/coreos/etcd:v3.5.0 \
-    etcd \
-    --advertise-client-urls http://0.0.0.0:2379 \
-    --listen-client-urls http://0.0.0.0:2379
+# # Start etcd
+# docker stop etcd 2>/dev/null || true
+# docker rm etcd 2>/dev/null || true
+# docker run -d --name etcd \
+#     -p 2379:2379 \
+#     quay.io/coreos/etcd:v3.5.0 \
+#     etcd \
+#     --advertise-client-urls http://0.0.0.0:2379 \
+#     --listen-client-urls http://0.0.0.0:2379
 
-sleep 2
+# # Start NATS
+# docker stop nats 2>/dev/null || true
+# docker rm nats 2>/dev/null || true
+# docker run -d --name nats -p 4222:4222 nats:latest
 
-# Build and run swap-coordinator
-# NOTE: requires a kubeconfig (~/.kube/config) pointing to a running Kubernetes cluster.
-# It uses the Kubernetes API to watch DynamoWorkerMetadata CRDs.
-# The swap-aware router will fall back to local KV-cache selection if it is unavailable.
-echo "Building swap-coordinator..."
-(cd "$SWAP_COORDINATOR_DIR" && go build -o bin/swap-coordinator .)
+# sleep 2
 
-HTTP_PORT=$SWAP_COORDINATOR_PORT "$SWAP_COORDINATOR_DIR/bin/swap-coordinator" &
+# # Build and run swap-coordinator
+# # NOTE: requires a kubeconfig (~/.kube/config) pointing to a running Kubernetes cluster.
+# # It watches Pods with the run.ai/swap-group-instance-uuid label directly (no CRDs needed).
+# # The swap-aware router will fall back to local KV-cache selection if it is unavailable.
+# echo "Building swap-coordinator..."
+# (cd "$SWAP_COORDINATOR_DIR" && go build -o bin/swap-coordinator .)
 
-# Frontend: HTTP API on port 8000
-# Uses round-robin routing, forwarding to the swap-aware router which is registered
-# in the discovery service at ${ROUTER_NAMESPACE}.router.generate
-python -m dynamo.frontend \
-    --router-mode round-robin \
-    --namespace $ROUTER_NAMESPACE &
+# HTTP_PORT=$SWAP_COORDINATOR_PORT "$SWAP_COORDINATOR_DIR/bin/swap-coordinator" &
 
-# Swap-aware router: KV-cache-aware routing to backend workers
-# Registers itself with the discovery service so the frontend can find it.
-# Workers are in the $WORKER_NAMESPACE namespace (not visible to the frontend).
-python -m dynamo.swap_aware_router \
-    --endpoint $WORKER_NAMESPACE.backend.generate \
-    --router-namespace $ROUTER_NAMESPACE \
-    --block-size $BLOCK_SIZE \
-    --swap-aware-routing \
-    --swap-coordinator-url "http://localhost:$SWAP_COORDINATOR_PORT" \
-    --swap-coordinator-timeout 1.0 \
-    --register-model \
-    --model-name $MODEL &
+# # Frontend: HTTP API on port 8000 (round-robin within ROUTER_NAMESPACE)
+# python -m dynamo.frontend \
+#     --namespace $ROUTER_NAMESPACE &
 
-# vLLM worker: aggregated (no prefill/decode split), KV events enabled for routing
-# Runs in $WORKER_NAMESPACE so the frontend routes through the swap-aware router,
-# not directly to this worker.
+# # Swap-aware router: KV-cache-aware routing to workers in WORKER_NAMESPACE,
+# # registers itself in ROUTER_NAMESPACE so the frontend can discover it
+# python -m dynamo.swap_aware_router \
+#     --endpoint $WORKER_NAMESPACE.backend.generate \
+#     --router-namespace $ROUTER_NAMESPACE \
+#     --swap-aware-routing \
+#     --swap-coordinator-url "http://localhost:$SWAP_COORDINATOR_PORT" \
+#     --swap-coordinator-timeout 1.0 \
+#     --register-model \
+#     --model-name $MODEL &
+
+# vLLM worker: runs in WORKER_NAMESPACE so the frontend doesn't discover it directly
+# CUDA_HOME is required for FlashInfer's JIT kernel compilation (nvcc is in the cu13 pip package)
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 DYN_NAMESPACE=$WORKER_NAMESPACE \
+CUDA_HOME=/opt/pytorch/cuda \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
-    --model $MODEL \
-    --block-size $BLOCK_SIZE \
-    --enforce-eager \
     --connector none \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+    --model $MODEL
 
 wait

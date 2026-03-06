@@ -20,7 +20,7 @@ from typing import Optional
 import aiohttp
 import uvloop
 
-from dynamo.llm import KvPushRouter, KvRouterConfig
+from dynamo.llm import KvRouter, KvRouterConfig, ModelInput, ModelType, register_model
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -48,7 +48,7 @@ class StandaloneRouterHandler:
         self.swap_aware_routing = swap_aware_routing
         self.swap_coordinator_url = swap_coordinator_url
         self.swap_coordinator_timeout = swap_coordinator_timeout
-        self.kv_push_router: Optional[KvPushRouter] = None
+        self.kv_push_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
         self._http_session: Optional[aiohttp.ClientSession] = None
 
@@ -65,16 +65,14 @@ class StandaloneRouterHandler:
             namespace, component, endpoint = parts
 
             # Get worker endpoint
-            worker_endpoint = (
-                self.runtime.namespace(namespace)
-                .component(component)
-                .endpoint(endpoint)
+            worker_endpoint = self.runtime.endpoint(
+                f"{namespace}.{component}.{endpoint}"
             )
 
             self.worker_client = await worker_endpoint.client()
 
-            # Create KvPushRouter with specified configuration
-            self.kv_push_router = KvPushRouter(
+            # Create KvRouter with specified configuration
+            self.kv_push_router = KvRouter(
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
@@ -90,7 +88,7 @@ class StandaloneRouterHandler:
                 )
 
         except Exception as e:
-            logger.error(f"Failed to initialize KvPushRouter: {e}")
+            logger.error(f"Failed to initialize KvRouter: {e}")
             raise
 
     async def cleanup(self):
@@ -174,10 +172,10 @@ class StandaloneRouterHandler:
         into LLMEngineOutput format.
         """
         if self.kv_push_router is None:
-            logger.error("KvPushRouter not initialized - cannot process request")
+            logger.error("KvRouter not initialized - cannot process request")
             raise RuntimeError("Router not initialized")
 
-        # Wrap incoming request into PreprocessedRequest format for KvPushRouter
+        # Wrap incoming request into PreprocessedRequest format for KvRouter
         # The request should already have most fields, but we ensure it has the structure
         # Build routing hints from request (supports both nested routing object and legacy dp_rank)
         routing = request.get("routing")
@@ -274,7 +272,7 @@ class StandaloneRouterHandler:
             "extra_args": request.get("extra_args"),
         }
 
-        # Route and process through KvPushRouter
+        # Route and process through KvRouter
         async for worker_output in await self.kv_push_router.generate_from_request(
             preprocessed_request
         ):
@@ -426,6 +424,34 @@ def parse_args():
         help="Timeout in seconds for SwapCoordinator API calls (default: 1.0)",
     )
 
+    parser.add_argument(
+        "--router-namespace",
+        type=str,
+        default=None,
+        help=(
+            "Namespace the router registers in (e.g. 'dynamo'). "
+            "Decouples the router's own registration namespace from the worker "
+            "endpoint namespace. Defaults to the namespace derived from --endpoint."
+        ),
+    )
+
+    parser.add_argument(
+        "--register-model",
+        action="store_true",
+        default=False,
+        help=(
+            "Register the router endpoint with the discovery service so the frontend "
+            "can route to it. Requires --model-name."
+        ),
+    )
+
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="Model name/path to advertise when using --register-model (e.g. Qwen/Qwen3-0.6B).",
+    )
+
     return parser.parse_args()
 
 
@@ -442,7 +468,8 @@ async def worker(runtime: DistributedRuntime):
             f"Invalid endpoint path format: {args.endpoint}. "
             "Expected format: namespace.component.endpoint"
         )
-    namespace = endpoint_parts[0]
+    worker_namespace = endpoint_parts[0]
+    namespace = args.router_namespace if args.router_namespace else worker_namespace
 
     logger.info("Starting Standalone Router Service")
     logger.debug(
@@ -477,9 +504,6 @@ async def worker(runtime: DistributedRuntime):
         router_prune_target_ratio=args.router_prune_target_ratio,
     )
 
-    # Create service component - use "router" as component name
-    component = runtime.namespace(namespace).component("router")
-
     # Create handler
     handler = StandaloneRouterHandler(
         runtime,
@@ -492,8 +516,21 @@ async def worker(runtime: DistributedRuntime):
     )
     await handler.initialize()
 
-    # Expose endpoints
-    generate_endpoint = component.endpoint("generate")
+    # Expose endpoints — get the generate endpoint then derive the component from it
+    generate_endpoint = runtime.endpoint(f"{namespace}.router.generate")
+    component = generate_endpoint.component()
+
+    if args.register_model:
+        if not args.model_name:
+            raise ValueError("--model-name is required when --register-model is set")
+        logger.info(f"Registering router endpoint as model '{args.model_name}'")
+        await register_model(
+            ModelInput.Tokens,
+            ModelType.Completions,
+            generate_endpoint,
+            args.model_name,
+            kv_cache_block_size=args.block_size,
+        )
 
     logger.debug("Starting to serve endpoints...")
 

@@ -1,80 +1,78 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	dynamov1 "github.com/ai-dynamo/dynamo/swap-coordinator/api/v1"
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
 )
 
-// DynamoWorkerMetadataReconciler reconciles a DynamoWorkerMetadata object
-type DynamoWorkerMetadataReconciler struct {
+const swapGroupLabelKey = "run.ai/swap-group-instance-uuid"
+
+// instanceIDPattern matches instance_id in worker logs.
+// Covers both structured tracing fields (instance_id=N) and
+// JSON log format ("instance_id":N).
+var instanceIDPattern = regexp.MustCompile(`instance_id[=:][\s"]*(\d+)`)
+
+// ansiEscape strips ANSI escape sequences from log output.
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// PodReconciler reconciles Pods that carry the swap-group-instance-uuid label
+type PodReconciler struct {
 	client.Client
 	Scheme       *runtime.Scheme
+	Clientset    kubernetes.Interface
 	StateManager *state.Manager
 }
 
-// Reconcile handles the reconciliation loop for DynamoWorkerMetadata resources
-// It watches for CRD changes and updates the state manager accordingly
-func (r *DynamoWorkerMetadataReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch the DynamoWorkerMetadata resource
-	var dynamoWorkerMetadata dynamov1.DynamoWorkerMetadata
-	if err := r.Get(ctx, req.NamespacedName, &dynamoWorkerMetadata); err != nil {
+	var pod corev1.Pod
+	if err := r.Get(ctx, req.NamespacedName, &pod); err != nil {
 		if errors.IsNotFound(err) {
-			// Resource was deleted, unregister the worker
-			logger.Info("DynamoWorkerMetadata resource not found, unregistering worker", "instanceID", req.Name)
-
-			// Use the resource name as the instance ID
-			instanceID := req.Name
-			if err := r.StateManager.UnregisterWorker(instanceID); err != nil {
-				// Log the error but don't fail - worker might already be unregistered
-				logger.Info("Failed to unregister worker (may not exist)", "instanceID", instanceID, "error", err)
+			logger.Info("Pod not found, unregistering worker", "podName", req.Name)
+			if unregErr := r.StateManager.UnregisterWorkerByPodName(req.Name); unregErr != nil {
+				logger.Info("Failed to unregister worker (may not exist)", "podName", req.Name, "error", unregErr)
 			}
-
 			return reconcile.Result{}, nil
 		}
-		// Error reading the object - requeue the request
-		logger.Error(err, "Failed to get DynamoWorkerMetadata")
+		logger.Error(err, "Failed to get Pod")
 		return reconcile.Result{}, err
 	}
 
-	// Extract instance ID from the CRD metadata name
-	instanceID := dynamoWorkerMetadata.Name
-
-	// Get the owner Pod
-	pod, err := r.getOwnerPod(ctx, &dynamoWorkerMetadata)
-	if err != nil {
-		// Pod not found - this will trigger a requeue after 5s
-		logger.Error(err, "Failed to get owner Pod", "instanceID", instanceID)
-		return reconcile.Result{}, err
-	}
-
-	// Extract the swap group instance UUID from the Pod annotation
-	swapGroupInstanceUUID, exists := pod.Annotations["run.ai/swap-group-instance-uuid"]
+	swapGroupInstanceUUID, exists := pod.Labels[swapGroupLabelKey]
 	if !exists || swapGroupInstanceUUID == "" {
-		// Missing annotation - log warning and return success (don't register)
-		logger.Info("Pod missing swap-group-instance-uuid annotation, skipping registration",
-			"instanceID", instanceID,
-			"podName", pod.Name,
-			"namespace", pod.Namespace)
+		logger.Info("Pod missing swap-group-instance-uuid label, skipping", "podName", pod.Name)
 		return reconcile.Result{}, nil
 	}
 
-	// Register the worker with the state manager
-	err = r.StateManager.RegisterWorker(instanceID, swapGroupInstanceUUID, pod.Name, pod.Namespace)
+	// Extract the real instance_id from the worker's logs
+	instanceID, err := r.extractInstanceIDFromLogs(ctx, &pod)
 	if err != nil {
+		logger.Info("Could not extract instance_id from pod logs, will retry",
+			"podName", pod.Name, "error", err)
+		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	if err := r.StateManager.RegisterWorker(instanceID, swapGroupInstanceUUID, pod.Name, pod.Namespace); err != nil {
 		logger.Error(err, "Failed to register worker",
 			"instanceID", instanceID,
 			"swapGroupInstanceUUID", swapGroupInstanceUUID,
@@ -92,45 +90,68 @@ func (r *DynamoWorkerMetadataReconciler) Reconcile(ctx context.Context, req reco
 	return reconcile.Result{}, nil
 }
 
-// getOwnerPod retrieves the owner Pod for the given DynamoWorkerMetadata resource
-func (r *DynamoWorkerMetadataReconciler) getOwnerPod(ctx context.Context, dwm *dynamov1.DynamoWorkerMetadata) (*corev1.Pod, error) {
-	// Get owner references
-	ownerRefs := dwm.GetOwnerReferences()
-	if len(ownerRefs) == 0 {
-		return nil, fmt.Errorf("no owner references found for DynamoWorkerMetadata %s", dwm.Name)
+// extractInstanceIDFromLogs fetches the pod's logs and parses the instance_id
+// that the worker logs during discovery registration.
+// It tries each container in the pod since multi-container pods require
+// specifying the container name.
+func (r *PodReconciler) extractInstanceIDFromLogs(ctx context.Context, pod *corev1.Pod) (uint64, error) {
+	containers := pod.Spec.Containers
+	if len(containers) == 0 {
+		return 0, fmt.Errorf("pod has no containers")
 	}
 
-	// Find the Pod owner
-	var podOwner *corev1.Pod
-	for _, ownerRef := range ownerRefs {
-		if ownerRef.Kind == "Pod" {
-			// Fetch the Pod
-			pod := &corev1.Pod{}
-			podName := types.NamespacedName{
-				Name:      ownerRef.Name,
-				Namespace: dwm.Namespace,
-			}
-			if err := r.Get(ctx, podName, pod); err != nil {
-				if errors.IsNotFound(err) {
-					return nil, fmt.Errorf("owner Pod %s not found in namespace %s", ownerRef.Name, dwm.Namespace)
-				}
-				return nil, fmt.Errorf("failed to get owner Pod %s: %w", ownerRef.Name, err)
-			}
-			podOwner = pod
-			break
+	for _, container := range containers {
+		id, err := r.extractInstanceIDFromContainerLogs(ctx, pod.Namespace, pod.Name, container.Name)
+		if err == nil {
+			return id, nil
 		}
 	}
 
-	if podOwner == nil {
-		return nil, fmt.Errorf("no Pod owner reference found for DynamoWorkerMetadata %s", dwm.Name)
-	}
-
-	return podOwner, nil
+	return 0, fmt.Errorf("instance_id not found in any container logs")
 }
 
-// SetupWithManager sets up the controller with the Manager
-func (r *DynamoWorkerMetadataReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *PodReconciler) extractInstanceIDFromContainerLogs(ctx context.Context, namespace, podName, containerName string) (uint64, error) {
+	logReq := r.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: containerName,
+	})
+	stream, err := logReq.Stream(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get log stream for container %s: %w", containerName, err)
+	}
+	defer stream.Close()
+
+	scanner := bufio.NewScanner(stream)
+	for scanner.Scan() {
+		line := ansiEscape.ReplaceAllString(scanner.Text(), "")
+		matches := instanceIDPattern.FindStringSubmatch(line)
+		if matches == nil {
+			continue
+		}
+		id, err := strconv.ParseUint(matches[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		if id == 0 {
+			continue
+		}
+		return id, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("error reading logs for container %s: %w", containerName, err)
+	}
+
+	return 0, fmt.Errorf("instance_id not found in container %s logs", containerName)
+}
+
+// SetupWithManager watches Pods that have the swap-group-instance-uuid label
+func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	hasSwapGroupLabel := predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		v, ok := obj.GetLabels()[swapGroupLabelKey]
+		return ok && v != ""
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&dynamov1.DynamoWorkerMetadata{}).
+		For(&corev1.Pod{}).
+		WithEventFilter(hasSwapGroupLabel).
 		Complete(r)
 }
