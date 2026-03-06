@@ -2,7 +2,7 @@ package api
 
 // WorkerCandidate represents a worker instance that could be selected for a request
 type WorkerCandidate struct {
-	InstanceID             string `json:"instance_id"`
+	InstanceID             uint64 `json:"instance_id"`
 	WorkerID               string `json:"worker_id"`
 	DPRank                 int    `json:"dp_rank"`
 	PotentialPrefillTokens int    `json:"potential_prefill_tokens"`
@@ -17,7 +17,7 @@ type SelectWorkerRequest struct {
 
 // SelectWorkerResponse contains the selected worker information and selection reason
 type SelectWorkerResponse struct {
-	SelectedInstanceID string `json:"selected_instance_id"`
+	SelectedInstanceID uint64 `json:"selected_instance_id"`
 	SelectedWorkerID   string `json:"selected_worker_id"`
 	SelectedDPRank     int    `json:"selected_dp_rank"`
 	Reason             string `json:"reason"`

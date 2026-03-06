@@ -10,14 +10,18 @@ import (
 // It provides thread-safe operations for registering, unregistering, and querying workers
 type Manager struct {
 	// workerMetadata maps instance IDs to their metadata
-	workerMetadata map[string]*WorkerMetadata
+	workerMetadata map[uint64]*WorkerMetadata
 
 	// swapGroupInstances maps swap group instance UUIDs to their state
 	swapGroupInstances map[string]*SwapGroupInstanceState
 
 	// instanceToSwapGroup maps instance IDs to their swap group instance UUID
 	// This provides O(1) lookup for GetSwapGroupInstance
-	instanceToSwapGroup map[string]string
+	instanceToSwapGroup map[uint64]string
+
+	// podNameToInstanceID maps pod names to their instance IDs
+	// This provides O(1) reverse lookup for UnregisterWorkerByPodName
+	podNameToInstanceID map[string]uint64
 
 	// mu protects all maps from concurrent access
 	mu sync.RWMutex
@@ -26,17 +30,18 @@ type Manager struct {
 // NewManager creates and initializes a new state Manager
 func NewManager() *Manager {
 	return &Manager{
-		workerMetadata:      make(map[string]*WorkerMetadata),
+		workerMetadata:      make(map[uint64]*WorkerMetadata),
 		swapGroupInstances:  make(map[string]*SwapGroupInstanceState),
-		instanceToSwapGroup: make(map[string]string),
+		instanceToSwapGroup: make(map[uint64]string),
+		podNameToInstanceID: make(map[string]uint64),
 	}
 }
 
 // RegisterWorker registers a new worker instance or updates an existing one
 // It associates the worker with a swap group instance and updates the last seen timestamp
-func (m *Manager) RegisterWorker(instanceID, swapGroupInstanceUUID, podName, namespace string) error {
-	if instanceID == "" {
-		return fmt.Errorf("instanceID cannot be empty")
+func (m *Manager) RegisterWorker(instanceID uint64, swapGroupInstanceUUID, podName, namespace string) error {
+	if instanceID == 0 {
+		return fmt.Errorf("instanceID cannot be zero")
 	}
 	if swapGroupInstanceUUID == "" {
 		return fmt.Errorf("swapGroupInstanceUUID cannot be empty")
@@ -82,12 +87,15 @@ func (m *Manager) RegisterWorker(instanceID, swapGroupInstanceUUID, podName, nam
 	// Update instance to swap group mapping
 	m.instanceToSwapGroup[instanceID] = swapGroupInstanceUUID
 
+	// Update pod name to instance ID mapping
+	m.podNameToInstanceID[podName] = instanceID
+
 	// Add worker to swap group instance
 	swapGroup, exists := m.swapGroupInstances[swapGroupInstanceUUID]
 	if !exists {
 		swapGroup = &SwapGroupInstanceState{
 			SwapGroupInstanceUUID: swapGroupInstanceUUID,
-			Workers:               make([]string, 0),
+			Workers:               make([]uint64, 0),
 		}
 		m.swapGroupInstances[swapGroupInstanceUUID] = swapGroup
 	}
@@ -98,9 +106,9 @@ func (m *Manager) RegisterWorker(instanceID, swapGroupInstanceUUID, podName, nam
 
 // UnregisterWorker removes a worker instance from the state manager
 // It cleans up all associated data structures and removes empty swap groups
-func (m *Manager) UnregisterWorker(instanceID string) error {
-	if instanceID == "" {
-		return fmt.Errorf("instanceID cannot be empty")
+func (m *Manager) UnregisterWorker(instanceID uint64) error {
+	if instanceID == 0 {
+		return fmt.Errorf("instanceID cannot be zero")
 	}
 
 	m.mu.Lock()
@@ -109,11 +117,14 @@ func (m *Manager) UnregisterWorker(instanceID string) error {
 	// Check if worker exists
 	metadata, exists := m.workerMetadata[instanceID]
 	if !exists {
-		return fmt.Errorf("worker %s not found", instanceID)
+		return fmt.Errorf("worker %d not found", instanceID)
 	}
 
 	// Get the swap group UUID before deleting
 	swapGroupUUID := metadata.SwapGroupInstanceUUID
+
+	// Remove from pod name mapping
+	delete(m.podNameToInstanceID, metadata.PodName)
 
 	// Remove from worker metadata
 	delete(m.workerMetadata, instanceID)
@@ -133,10 +144,23 @@ func (m *Manager) UnregisterWorker(instanceID string) error {
 	return nil
 }
 
+// UnregisterWorkerByPodName removes a worker instance using the pod name as a key
+func (m *Manager) UnregisterWorkerByPodName(podName string) error {
+	m.mu.Lock()
+	instanceID, exists := m.podNameToInstanceID[podName]
+	m.mu.Unlock()
+
+	if !exists {
+		return fmt.Errorf("worker with pod name %s not found", podName)
+	}
+
+	return m.UnregisterWorker(instanceID)
+}
+
 // GetSwapGroupInstance returns the swap group instance UUID for a given worker instance ID
-func (m *Manager) GetSwapGroupInstance(instanceID string) (string, error) {
-	if instanceID == "" {
-		return "", fmt.Errorf("instanceID cannot be empty")
+func (m *Manager) GetSwapGroupInstance(instanceID uint64) (string, error) {
+	if instanceID == 0 {
+		return "", fmt.Errorf("instanceID cannot be zero")
 	}
 
 	m.mu.RLock()
@@ -144,10 +168,28 @@ func (m *Manager) GetSwapGroupInstance(instanceID string) (string, error) {
 
 	swapGroupUUID, exists := m.instanceToSwapGroup[instanceID]
 	if !exists {
-		return "", fmt.Errorf("worker %s not found", instanceID)
+		return "", fmt.Errorf("worker %d not found", instanceID)
 	}
 
 	return swapGroupUUID, nil
+}
+
+// GetSwapGroupState returns the full swap group state for a given swap group instance UUID
+func (m *Manager) GetSwapGroupState(swapGroupInstanceUUID string) *SwapGroupInstanceState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.swapGroupInstances[swapGroupInstanceUUID]
+}
+
+// SetWarmInstance updates the warm worker for a swap group instance
+func (m *Manager) SetWarmInstance(swapGroupInstanceUUID string, instanceID uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if swapGroup, ok := m.swapGroupInstances[swapGroupInstanceUUID]; ok {
+		swapGroup.WarmInstanceID = instanceID
+	}
 }
 
 // ListWorkers returns a list of all registered workers
@@ -168,9 +210,9 @@ func (m *Manager) ListWorkers() []*WorkerMetadata {
 
 // GetWorkersInSwapGroup returns a list of instance IDs for all workers in a given swap group
 // The returned slice is a copy to prevent external modifications
-func (m *Manager) GetWorkersInSwapGroup(swapGroupInstanceUUID string) []string {
+func (m *Manager) GetWorkersInSwapGroup(swapGroupInstanceUUID string) []uint64 {
 	if swapGroupInstanceUUID == "" {
-		return []string{}
+		return []uint64{}
 	}
 
 	m.mu.RLock()
@@ -178,11 +220,11 @@ func (m *Manager) GetWorkersInSwapGroup(swapGroupInstanceUUID string) []string {
 
 	swapGroup, exists := m.swapGroupInstances[swapGroupInstanceUUID]
 	if !exists {
-		return []string{}
+		return []uint64{}
 	}
 
 	// Return a copy to prevent external modifications
-	workers := make([]string, len(swapGroup.Workers))
+	workers := make([]uint64, len(swapGroup.Workers))
 	copy(workers, swapGroup.Workers)
 
 	return workers

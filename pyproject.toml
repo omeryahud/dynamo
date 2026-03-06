@@ -25,6 +25,7 @@ dependencies = [
     "setuptools",
     "prometheus_client>=0.23.1,<1.0",
     "msgpack==1.1.2",
+    "aiohttp>=3.9.0",
 ]
 
 classifiers = [
