@@ -117,8 +117,7 @@ class StandaloneRouterHandler:
             worker_candidates = []
             for worker in workers:
                 candidate = {
-                    "instance_id": worker.get("instance_id", f"worker-{worker['worker_id']}"),
-                    "worker_id": worker["worker_id"],
+                    "instance_id": worker["worker_id"],
                     "dp_rank": worker["dp_rank"],
                     "potential_prefill_tokens": worker["potential_prefill_tokens"],
                     "potential_decode_blocks": worker["potential_decode_blocks"],
@@ -137,7 +136,7 @@ class StandaloneRouterHandler:
                     result = await response.json()
                     logger.debug(
                         f"SwapCoordinator selected: instance_id={result['selected_instance_id']}, "
-                        f"worker_id={result['selected_worker_id']}, reason={result['reason']}"
+                        f"dp_rank={result['selected_dp_rank']}, reason={result['reason']}"
                     )
                     return result
                 elif response.status == 501:
@@ -211,12 +210,12 @@ class StandaloneRouterHandler:
 
                         if coordinator_result:
                             # SwapCoordinator made a selection
-                            selected_worker_id = coordinator_result["selected_worker_id"]
+                            selected_instance_id = coordinator_result["selected_instance_id"]
                             selected_dp_rank = coordinator_result["selected_dp_rank"]
 
                             # Find the matching worker in potential_loads
                             for worker in potential_loads:
-                                if (worker["worker_id"] == selected_worker_id and
+                                if (worker["worker_id"] == selected_instance_id and
                                     worker["dp_rank"] == selected_dp_rank):
                                     best_worker = worker
                                     selection_source = "swap-coordinator"
@@ -224,7 +223,7 @@ class StandaloneRouterHandler:
 
                             if not best_worker:
                                 logger.warning(
-                                    f"SwapCoordinator selected worker_id={selected_worker_id} "
+                                    f"SwapCoordinator selected instance_id={selected_instance_id} "
                                     f"dp_rank={selected_dp_rank}, but worker not found in "
                                     f"potential_loads. Falling back to local selection."
                                 )
@@ -526,7 +525,7 @@ async def worker(runtime: DistributedRuntime):
         logger.info(f"Registering router endpoint as model '{args.model_name}'")
         await register_model(
             ModelInput.Tokens,
-            ModelType.Completions,
+            ModelType.Chat | ModelType.Completions,
             generate_endpoint,
             args.model_name,
             kv_cache_block_size=args.block_size,

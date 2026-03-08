@@ -5,7 +5,10 @@ import (
 
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
 	"github.com/gin-gonic/gin"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
+
+var handlerLog = ctrl.Log.WithName("select-worker")
 
 // HealthHandler handles GET /health requests
 // Returns the service status and count of discovered workers
@@ -45,6 +48,8 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 			return
 		}
 
+		logger := handlerLog.WithValues("requestID", request.RequestID, "candidates", len(request.Workers))
+
 		// Try to find a warm match
 		var selected *WorkerCandidate
 		var selectedSwapGroupUUID string
@@ -54,6 +59,8 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 			candidate := &request.Workers[i]
 			swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
 			if err != nil {
+				logger.V(1).Info("Candidate not registered with coordinator",
+					"instanceID", candidate.InstanceID, "dpRank", candidate.DPRank)
 				continue
 			}
 			swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
@@ -64,6 +71,10 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 				selected = candidate
 				selectedSwapGroupUUID = swapGroupUUID
 				reason = "warm-model"
+				logger.Info("Selected warm worker",
+					"instanceID", candidate.InstanceID,
+					"dpRank", candidate.DPRank,
+					"swapGroup", swapGroupUUID)
 				break
 			}
 		}
@@ -75,6 +86,10 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 			if err == nil {
 				selectedSwapGroupUUID = swapGroupUUID
 			}
+			logger.Info("No warm match, falling back to first candidate",
+				"instanceID", selected.InstanceID,
+				"dpRank", selected.DPRank,
+				"swapGroup", selectedSwapGroupUUID)
 		}
 
 		// Update the warm instance for the selected worker's swap group
@@ -84,7 +99,6 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 
 		c.JSON(http.StatusOK, SelectWorkerResponse{
 			SelectedInstanceID: selected.InstanceID,
-			SelectedWorkerID:   selected.WorkerID,
 			SelectedDPRank:     selected.DPRank,
 			Reason:             reason,
 		})

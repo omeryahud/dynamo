@@ -2,21 +2,17 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: swap-coordinator
-  namespace: default
+  namespace: dynamo-system
+  labels:
+    app: swap-coordinator
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: swap-coordinator-role
+  labels:
+    app: swap-coordinator
 rules:
-- apiGroups:
-  - ai-dynamo.nvidia.com
-  resources:
-  - dynamoworkermetadatas
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - ""
   resources:
@@ -25,11 +21,19 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: swap-coordinator-binding
+  labels:
+    app: swap-coordinator
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -37,4 +41,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: swap-coordinator
-  namespace: default
+  namespace: dynamo-system
