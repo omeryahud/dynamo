@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: swap-coordinator
-  namespace: default
+  namespace: dynamo-system
   labels:
     app: swap-coordinator
 spec:
@@ -15,11 +15,13 @@ spec:
       labels:
         app: swap-coordinator
     spec:
+      nodeSelector:
+        run.ai/swap-enabled: 'true'
       serviceAccountName: swap-coordinator
       containers:
       - name: swap-coordinator
-        image: runai.jfrog.io/op-containers-lab/swap-ccordinator:0.9.0-29729-dev
-        imagePullPolicy: IfNotPresent
+        image: swap-coordinator:latest
+        imagePullPolicy: Never
         ports:
         - containerPort: 8080
           name: http

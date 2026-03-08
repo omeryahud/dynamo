@@ -45,24 +45,24 @@ SWAP_COORDINATOR_DIR="$SCRIPT_DIR/.."
 # python -m dynamo.frontend \
 #     --namespace $ROUTER_NAMESPACE &
 
-# # Swap-aware router: KV-cache-aware routing to workers in WORKER_NAMESPACE,
-# # registers itself in ROUTER_NAMESPACE so the frontend can discover it
-# python -m dynamo.swap_aware_router \
-#     --endpoint $WORKER_NAMESPACE.backend.generate \
-#     --router-namespace $ROUTER_NAMESPACE \
-#     --swap-aware-routing \
-#     --swap-coordinator-url "http://localhost:$SWAP_COORDINATOR_PORT" \
-#     --swap-coordinator-timeout 1.0 \
-#     --register-model \
-#     --model-name $MODEL &
+# Swap-aware router: KV-cache-aware routing to workers in WORKER_NAMESPACE,
+# registers itself in ROUTER_NAMESPACE so the frontend can discover it
+python -m dynamo.swap_aware_router \
+    --endpoint $WORKER_NAMESPACE.backend.generate \
+    --router-namespace $ROUTER_NAMESPACE \
+    --swap-aware-routing \
+    --swap-coordinator-url "http://localhost:$SWAP_COORDINATOR_PORT" \
+    --swap-coordinator-timeout 1.0 \
+    --register-model \
+    --model-name $MODEL &
 
-# vLLM worker: runs in WORKER_NAMESPACE so the frontend doesn't discover it directly
-# CUDA_HOME is required for FlashInfer's JIT kernel compilation (nvcc is in the cu13 pip package)
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-DYN_NAMESPACE=$WORKER_NAMESPACE \
-CUDA_HOME=/opt/pytorch/cuda \
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
-    --connector none \
-    --model $MODEL
+# # vLLM worker: runs in WORKER_NAMESPACE so the frontend doesn't discover it directly
+# # CUDA_HOME is required for FlashInfer's JIT kernel compilation (nvcc is in the cu13 pip package)
+# DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+# DYN_NAMESPACE=$WORKER_NAMESPACE \
+# CUDA_HOME=/opt/pytorch/cuda \
+# CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+#     --connector none \
+#     --model $MODEL
 
 wait

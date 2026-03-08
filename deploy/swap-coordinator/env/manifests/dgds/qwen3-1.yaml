@@ -17,9 +17,9 @@ spec:
           runai/queue: swap
       replicas: 1
       envs:
-        # Enable KV-aware routing mode - Frontend will use Router for request routing
+        # Route requests to the Router (swap_aware_router), not directly to workers
         - name: DYN_ROUTER_MODE
-          value: kv
+          value: round-robin
       extraPodSpec:
         mainContainer:
           image: dynamo:latest-vllm-runtime
@@ -31,7 +31,7 @@ spec:
             capabilities:
               drop:
               - ALL
-        nodeSelector:                                                                                                                                                   
+        nodeSelector:
           run.ai/swap-enabled: 'true'
         schedulerName: runai-scheduler
         securityContext:
@@ -51,17 +51,26 @@ spec:
           image: dynamo:latest-vllm-runtime
           imagePullPolicy: Never
           name: ""
+          env:
+          - name: DYN_LOG
+            value: "info,dynamo.swap_aware_router=debug"
           command:
           - python3
           - -m
-          # - dynamo.router
           - dynamo.swap_aware_router
           args:
           - --endpoint
-          - dynamo.vllm.generate
+          - swap-qwen3-1.backend.generate
+          - --router-namespace
+          - swap-qwen3-1
           - --swap-aware-routing
           - --swap-coordinator-url
-          - http://swap-coordinator-service:8080
+          - http://swap-coordinator-service.dynamo-system.svc.cluster.local:8080
+          - --swap-coordinator-timeout
+          - "1.0"
+          - --register-model
+          - --model-name
+          - Qwen/Qwen3-0.6B
           resources: {}
           securityContext:
             allowPrivilegeEscalation: false
@@ -105,7 +114,7 @@ spec:
           - --model
           - Qwen/Qwen3-0.6B
           - --served-model-name
-          - Qwen/Qwen3-0.6B
+          - Qwen/Qwen3-0.6B-worker
           # - --publish-events-and-metrics
           securityContext:
             allowPrivilegeEscalation: false
