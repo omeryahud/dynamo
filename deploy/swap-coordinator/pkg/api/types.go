@@ -64,6 +64,14 @@ type SetWarmRequest struct {
 	InstanceID    string `json:"instance_id" binding:"required"`
 }
 
+// UpdateDGDRequest contains the DGD name/namespace and new min/max warm worker values
+type UpdateDGDRequest struct {
+	Name           string `json:"name" binding:"required"`
+	Namespace      string `json:"namespace" binding:"required"`
+	MinWarmWorkers int    `json:"min_warm_workers"`
+	MaxWarmWorkers int    `json:"max_warm_workers"`
+}
+
 // ErrorResponse contains error information for failed requests
 type ErrorResponse struct {
 	Error string `json:"error"`

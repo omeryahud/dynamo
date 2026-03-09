@@ -19,7 +19,7 @@ spec:
             enabled: true
           enabled: true
           limits:
-            cpuRam: 32G
+            cpuRam: 48G
             reservedGpuRam: 2G
     imagesPullSecret: runai-reg-creds
   namespace: runai-engine
@@ -74,7 +74,7 @@ spec:
       limit: -1
       overQuotaWeight: 1
     gpu:
-      quota: 4
+      quota: 6
       limit: -1
       overQuotaWeight: 1
     memory:

@@ -1,12 +1,17 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
 	"github.com/gin-gonic/gin"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -120,6 +125,83 @@ func DGDsHandler(stateManager *state.Manager) gin.HandlerFunc {
 		}
 
 		c.JSON(http.StatusOK, dgds)
+	}
+}
+
+var dgdGVR = schema.GroupVersionResource{
+	Group:    "nvidia.com",
+	Version:  "v1alpha1",
+	Resource: "dynamographdeployments",
+}
+
+// UpdateDGDHandler handles PUT /dgds requests
+// Updates the min/max warm worker annotations on the DGD resource in Kubernetes
+// and also updates the in-memory state manager
+func UpdateDGDHandler(stateManager *state.Manager, dynamicClient dynamic.Interface) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var request UpdateDGDRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error: "Invalid request: " + err.Error(),
+			})
+			return
+		}
+
+		if request.MinWarmWorkers < 0 || request.MaxWarmWorkers < 0 {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error: "min_warm_workers and max_warm_workers must be >= 0",
+			})
+			return
+		}
+
+		if request.MaxWarmWorkers > 0 && request.MinWarmWorkers > request.MaxWarmWorkers {
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error: "min_warm_workers cannot exceed max_warm_workers",
+			})
+			return
+		}
+
+		// Patch the DGD annotations in Kubernetes
+		patch := map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"annotations": map[string]string{
+					"swap-coordinator/min-warm-workers": strconv.Itoa(request.MinWarmWorkers),
+					"swap-coordinator/max-warm-workers": strconv.Itoa(request.MaxWarmWorkers),
+				},
+			},
+		}
+		patchBytes, err := json.Marshal(patch)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error: "Failed to marshal patch: " + err.Error(),
+			})
+			return
+		}
+
+		_, err = dynamicClient.Resource(dgdGVR).Namespace(request.Namespace).Patch(
+			c.Request.Context(),
+			request.Name,
+			k8stypes.MergePatchType,
+			patchBytes,
+			metav1.PatchOptions{},
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error: "Failed to patch DGD annotations: " + err.Error(),
+			})
+			return
+		}
+
+		// Also update in-memory state immediately
+		stateManager.SetDGDConfig(request.Name, request.Namespace, request.MinWarmWorkers, request.MaxWarmWorkers)
+
+		handlerLog.Info("Updated DGD config",
+			"dgdName", request.Name,
+			"namespace", request.Namespace,
+			"minWarm", request.MinWarmWorkers,
+			"maxWarm", request.MaxWarmWorkers)
+
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
 
