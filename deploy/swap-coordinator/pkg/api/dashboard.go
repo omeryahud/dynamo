@@ -10,7 +10,21 @@ const dashboardHTML = `<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; padding: 24px; }
   h1 { font-size: 22px; margin-bottom: 16px; color: #94a3b8; }
+  h2 { font-size: 18px; margin: 24px 0 12px; color: #94a3b8; }
   .status { font-size: 13px; color: #64748b; margin-bottom: 20px; }
+  .dgd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .dgd-card { background: #1e293b; border-radius: 10px; padding: 14px 16px; border: 1px solid #334155; }
+  .dgd-card.ok { border-color: #22c55e; }
+  .dgd-card.warn { border-color: #eab308; }
+  .dgd-card.over { border-color: #ef4444; }
+  .dgd-name { font-size: 15px; font-weight: 600; color: #e2e8f0; margin-bottom: 8px; }
+  .dgd-ns { font-size: 11px; color: #64748b; }
+  .dgd-stats { display: flex; gap: 16px; font-size: 13px; color: #94a3b8; }
+  .dgd-stats .label { color: #64748b; }
+  .dgd-warm { font-weight: 600; }
+  .dgd-warm.ok { color: #4ade80; }
+  .dgd-warm.warn { color: #facc15; }
+  .dgd-warm.over { color: #f87171; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
   .swap-group { background: #1e293b; border-radius: 10px; padding: 16px; border: 1px solid #334155; }
   .swap-group-header { font-size: 14px; font-weight: 600; color: #cbd5e1; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
@@ -24,6 +38,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .worker .info { flex: 1; min-width: 0; }
   .worker .pod-name { font-size: 13px; font-weight: 500; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .worker .instance-id { font-size: 11px; color: #64748b; font-family: monospace; }
+  .worker .dgd-label { font-size: 10px; color: #818cf8; }
   .worker .badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
   .worker.warm .badge { background: #16a34a30; color: #4ade80; }
   .empty { color: #475569; font-size: 13px; font-style: italic; text-align: center; padding: 32px; }
@@ -32,14 +47,43 @@ const dashboardHTML = `<!DOCTYPE html>
 <body>
 <h1>Swap Coordinator Dashboard</h1>
 <div class="status" id="status">Loading...</div>
+<div id="dgd-section"></div>
+<h2>Swap Groups</h2>
 <div class="grid" id="grid"></div>
 <script>
 async function refresh() {
   try {
-    const res = await fetch('/state');
-    const groups = await res.json();
+    const [stateRes, dgdRes] = await Promise.all([fetch('/state'), fetch('/dgds')]);
+    const groups = await stateRes.json();
+    const dgds = await dgdRes.json();
     const grid = document.getElementById('grid');
     const status = document.getElementById('status');
+    const dgdSection = document.getElementById('dgd-section');
+
+    // Render DGD summary
+    if (dgds && dgds.length > 0) {
+      let dgdHtml = '<h2>DGD Configurations</h2><div class="dgd-grid">';
+      for (const d of dgds) {
+        const max = d.max_warm_workers;
+        const min = d.min_warm_workers;
+        const cur = d.current_warm;
+        let cls = 'ok';
+        let warmCls = 'ok';
+        if (max > 0 && cur > max) { cls = 'over'; warmCls = 'over'; }
+        else if (min > 0 && cur < min) { cls = 'warn'; warmCls = 'warn'; }
+        dgdHtml += '<div class="dgd-card ' + cls + '">';
+        dgdHtml += '<div class="dgd-name">' + esc(d.name) + ' <span class="dgd-ns">(' + esc(d.namespace) + ')</span></div>';
+        dgdHtml += '<div class="dgd-stats">';
+        dgdHtml += '<span><span class="label">warm:</span> <span class="dgd-warm ' + warmCls + '">' + cur + '</span></span>';
+        dgdHtml += '<span><span class="label">min:</span> ' + min + '</span>';
+        dgdHtml += '<span><span class="label">max:</span> ' + (max === 0 ? 'unlimited' : max) + '</span>';
+        dgdHtml += '</div></div>';
+      }
+      dgdHtml += '</div>';
+      dgdSection.innerHTML = dgdHtml;
+    } else {
+      dgdSection.innerHTML = '';
+    }
 
     if (!groups || groups.length === 0) {
       grid.innerHTML = '<div class="empty">No swap groups registered</div>';
@@ -66,6 +110,7 @@ async function refresh() {
         html += '<div class="info">';
         html += '<div class="pod-name">' + esc(w.pod_name || 'unknown') + '</div>';
         html += '<div class="instance-id">' + w.instance_id + '</div>';
+        if (w.dgd_name) html += '<div class="dgd-label">' + esc(w.dgd_name) + '</div>';
         html += '</div>';
         if (warm) html += '<div class="badge">warm</div>';
         html += '</div>';

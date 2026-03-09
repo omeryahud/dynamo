@@ -23,6 +23,12 @@ type Manager struct {
 	// This provides O(1) reverse lookup for UnregisterWorkerByPodName
 	podNameToInstanceID map[string]uint64
 
+	// dgdConfigs maps "namespace/name" to DGD configuration
+	dgdConfigs map[string]*DGDConfig
+
+	// instanceToDGD maps worker instance IDs to their DGD key ("namespace/name")
+	instanceToDGD map[uint64]string
+
 	// mu protects all maps from concurrent access
 	mu sync.RWMutex
 }
@@ -34,12 +40,14 @@ func NewManager() *Manager {
 		swapGroupInstances:  make(map[string]*SwapGroupInstanceState),
 		instanceToSwapGroup: make(map[uint64]string),
 		podNameToInstanceID: make(map[string]uint64),
+		dgdConfigs:          make(map[string]*DGDConfig),
+		instanceToDGD:       make(map[uint64]string),
 	}
 }
 
 // RegisterWorker registers a new worker instance or updates an existing one
 // It associates the worker with a swap group instance and updates the last seen timestamp
-func (m *Manager) RegisterWorker(instanceID uint64, swapGroupInstanceUUID, podName, namespace string) error {
+func (m *Manager) RegisterWorker(instanceID uint64, swapGroupInstanceUUID, podName, namespace, dgdName, dgdNamespace string) error {
 	if instanceID == 0 {
 		return fmt.Errorf("instanceID cannot be zero")
 	}
@@ -72,6 +80,8 @@ func (m *Manager) RegisterWorker(instanceID uint64, swapGroupInstanceUUID, podNa
 		metadata.SwapGroupInstanceUUID = swapGroupInstanceUUID
 		metadata.PodName = podName
 		metadata.Namespace = namespace
+		metadata.DGDName = dgdName
+		metadata.DGDNamespace = dgdNamespace
 		metadata.LastSeenAt = now
 	} else {
 		// Register new worker
@@ -80,8 +90,15 @@ func (m *Manager) RegisterWorker(instanceID uint64, swapGroupInstanceUUID, podNa
 			SwapGroupInstanceUUID: swapGroupInstanceUUID,
 			PodName:               podName,
 			Namespace:             namespace,
+			DGDName:               dgdName,
+			DGDNamespace:          dgdNamespace,
 			LastSeenAt:            now,
 		}
+	}
+
+	// Update instance to DGD mapping
+	if dgdName != "" {
+		m.instanceToDGD[instanceID] = dgdNamespace + "/" + dgdName
 	}
 
 	// Update instance to swap group mapping
@@ -131,6 +148,9 @@ func (m *Manager) UnregisterWorker(instanceID uint64) error {
 
 	// Remove from instance to swap group mapping
 	delete(m.instanceToSwapGroup, instanceID)
+
+	// Remove from instance to DGD mapping
+	delete(m.instanceToDGD, instanceID)
 
 	// Remove from swap group instance
 	if swapGroup, ok := m.swapGroupInstances[swapGroupUUID]; ok {
@@ -237,6 +257,76 @@ func (m *Manager) GetWorkerMetadata(instanceID uint64) *WorkerMetadata {
 		return &copy
 	}
 	return nil
+}
+
+// SetDGDConfig stores or updates the min/max warm worker configuration for a DGD
+func (m *Manager) SetDGDConfig(name, namespace string, minWarm, maxWarm int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := namespace + "/" + name
+	m.dgdConfigs[key] = &DGDConfig{
+		Name:           name,
+		Namespace:      namespace,
+		MinWarmWorkers: minWarm,
+		MaxWarmWorkers: maxWarm,
+	}
+}
+
+// GetDGDConfig returns the DGD configuration for the given name and namespace
+func (m *Manager) GetDGDConfig(name, namespace string) *DGDConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key := namespace + "/" + name
+	if cfg, ok := m.dgdConfigs[key]; ok {
+		copy := *cfg
+		return &copy
+	}
+	return nil
+}
+
+// ListDGDConfigs returns all DGD configurations
+func (m *Manager) ListDGDConfigs() []*DGDConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	configs := make([]*DGDConfig, 0, len(m.dgdConfigs))
+	for _, cfg := range m.dgdConfigs {
+		copy := *cfg
+		configs = append(configs, &copy)
+	}
+	return configs
+}
+
+// CountWarmWorkersForDGD counts how many swap group instances currently have a warm
+// worker that belongs to the given DGD
+func (m *Manager) CountWarmWorkersForDGD(name, namespace string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	dgdKey := namespace + "/" + name
+	count := 0
+	for _, sg := range m.swapGroupInstances {
+		if sg.WarmInstanceID == 0 {
+			continue
+		}
+		if workerDGDKey, ok := m.instanceToDGD[sg.WarmInstanceID]; ok && workerDGDKey == dgdKey {
+			count++
+		}
+	}
+	return count
+}
+
+// GetWorkerDGD returns the DGD name and namespace for a worker instance
+func (m *Manager) GetWorkerDGD(instanceID uint64) (name, namespace string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if meta, ok := m.workerMetadata[instanceID]; ok {
+		return meta.DGDName, meta.DGDNamespace
+	}
+	return "", ""
 }
 
 // GetWorkersInSwapGroup returns a list of instance IDs for all workers in a given swap group
