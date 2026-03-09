@@ -182,7 +182,8 @@ func (m *Manager) GetSwapGroupState(swapGroupInstanceUUID string) *SwapGroupInst
 	return m.swapGroupInstances[swapGroupInstanceUUID]
 }
 
-// SetWarmInstance updates the warm worker for a swap group instance
+// SetWarmInstance updates the warm worker for a swap group instance.
+// Only one worker can be warm per swap-group-instance (one GPU).
 func (m *Manager) SetWarmInstance(swapGroupInstanceUUID string, instanceID uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -206,6 +207,36 @@ func (m *Manager) ListWorkers() []*WorkerMetadata {
 	}
 
 	return workers
+}
+
+// Snapshot returns a point-in-time copy of the full state for visualization
+func (m *Manager) Snapshot() map[string]*SwapGroupInstanceState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	snap := make(map[string]*SwapGroupInstanceState, len(m.swapGroupInstances))
+	for uuid, sg := range m.swapGroupInstances {
+		workers := make([]uint64, len(sg.Workers))
+		copy(workers, sg.Workers)
+		snap[uuid] = &SwapGroupInstanceState{
+			SwapGroupInstanceUUID: sg.SwapGroupInstanceUUID,
+			Workers:               workers,
+			WarmInstanceID:        sg.WarmInstanceID,
+		}
+	}
+	return snap
+}
+
+// GetWorkerMetadata returns metadata for a specific worker instance
+func (m *Manager) GetWorkerMetadata(instanceID uint64) *WorkerMetadata {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if meta, ok := m.workerMetadata[instanceID]; ok {
+		copy := *meta
+		return &copy
+	}
+	return nil
 }
 
 // GetWorkersInSwapGroup returns a list of instance IDs for all workers in a given swap group

@@ -37,6 +37,7 @@ class StandaloneRouterHandler:
         worker_endpoint_path: str,
         block_size: int,
         kv_router_config: KvRouterConfig,
+        overlap_score_weight: float = 1.0,
         swap_aware_routing: bool = False,
         swap_coordinator_url: Optional[str] = None,
         swap_coordinator_timeout: float = 1.0,
@@ -45,6 +46,7 @@ class StandaloneRouterHandler:
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
+        self.overlap_score_weight = overlap_score_weight
         self.swap_aware_routing = swap_aware_routing
         self.swap_coordinator_url = swap_coordinator_url
         self.swap_coordinator_timeout = swap_coordinator_timeout
@@ -123,6 +125,14 @@ class StandaloneRouterHandler:
                     "potential_decode_blocks": worker["potential_decode_blocks"],
                 }
                 worker_candidates.append(candidate)
+
+            # Compute KvRouter-equivalent logit per candidate and sort (best first)
+            # logit = overlap_weight * (prefill_tokens / block_size) + decode_blocks
+            for candidate in worker_candidates:
+                prefill_blocks = candidate["potential_prefill_tokens"] / self.block_size
+                candidate["logit"] = self.overlap_score_weight * prefill_blocks + candidate["potential_decode_blocks"]
+
+            worker_candidates.sort(key=lambda w: w["logit"])
 
             payload = {
                 "workers": worker_candidates,
@@ -230,14 +240,15 @@ class StandaloneRouterHandler:
 
                     # Fall back to local selection if SwapCoordinator unavailable or failed
                     if not best_worker:
-                        best_worker = min(
-                            potential_loads,
-                            key=lambda x: x['potential_prefill_tokens']
-                        )
+                        def _logit(w):
+                            prefill_blocks = w["potential_prefill_tokens"] / self.block_size
+                            return self.overlap_score_weight * prefill_blocks + w["potential_decode_blocks"]
+
+                        best_worker = min(potential_loads, key=_logit)
                         selection_source = "local"
 
                     routing = {
-                        "worker_id": best_worker['worker_id'],
+                        "backend_instance_id": best_worker['worker_id'],
                         "dp_rank": best_worker['dp_rank']
                     }
 
@@ -509,6 +520,7 @@ async def worker(runtime: DistributedRuntime):
         args.endpoint,
         args.block_size,
         kv_router_config,
+        overlap_score_weight=args.kv_overlap_score_weight,
         swap_aware_routing=args.swap_aware_routing,
         swap_coordinator_url=args.swap_coordinator_url,
         swap_coordinator_timeout=args.swap_coordinator_timeout,

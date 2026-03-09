@@ -29,7 +29,8 @@ type SwapGroupInstanceState struct {
 	// Workers is a list of instance IDs that belong to this swap group instance
 	Workers []uint64
 
-	// WarmInstanceID is the instance_id of the worker that was last routed to on this swap group
+	// WarmInstanceID is the instance_id of the worker that is currently warm (loaded on GPU)
+	// on this swap-group-instance. Only one worker can be warm at a time per GPU.
 	WarmInstanceID uint64
 }
 
