@@ -89,7 +89,7 @@ spec:
         runai/queue: swap
       componentType: worker
       envFromSecret: hf-token-secret
-      replicas: 2
+      replicas: 4
       extraPodMetadata:
         annotations:
           gpu-fraction: "0.5"

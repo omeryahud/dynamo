@@ -4,7 +4,7 @@ set -euo pipefail
 DYNAMO_IMAGE="dynamo:latest-vllm-runtime"
 SC_IMAGE="swap-coordinator:latest"
 EXPORT_DIR="$HOME/dynamo"
-SERVERS=("gpu-node-1" "gpu-node-2")
+SERVERS=("gpu-node-1" "gpu-node-2" "gpu-node-3" "gpu-node-4")
 REMOTE_DIR="/tmp/dynamo"
 
 REPO_ROOT=~/go/src/github.com/omeryahud/dynamo
@@ -22,7 +22,7 @@ deploy_to_server() {
     rsync -az --info=progress2 "$tar_file" "$server:$remote_file"
 
     echo "$log_prefix Loading into k8s.io namespace..."
-    ssh "$server" "sudo nerdctl --namespace k8s.io load -i $remote_file"
+    ssh "$server" "sudo ctr --namespace k8s.io images import $remote_file"
 
     echo "$log_prefix Cleaning up remote tar..."
     ssh "$server" "rm -f $remote_file"

@@ -51,6 +51,13 @@ func NewServer(stateManager *state.Manager) *Server {
 
 // registerRoutes sets up all HTTP routes
 func (s *Server) registerRoutes() {
+	// Dashboard
+	s.router.GET("/", DashboardHandler())
+
+	// State endpoints for visualization
+	s.router.GET("/state", StateHandler(s.stateManager))
+	s.router.PUT("/state/warm", SetWarmHandler(s.stateManager))
+
 	// Health check endpoint
 	s.router.GET("/health", HealthHandler(s.stateManager))
 
