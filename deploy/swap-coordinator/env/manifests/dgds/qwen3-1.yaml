@@ -95,7 +95,7 @@ spec:
       replicas: 4
       extraPodMetadata:
         annotations:
-          gpu-fraction: "0.5"
+          gpu-fraction: "0.3"
       extraPodSpec:
         mainContainer:
           env:

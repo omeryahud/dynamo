@@ -11,24 +11,27 @@ import (
 
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
 	"github.com/gin-gonic/gin"
+	"k8s.io/client-go/dynamic"
 )
 
 // Server wraps the HTTP server and provides lifecycle management
 type Server struct {
-	stateManager *state.Manager
-	httpServer   *http.Server
-	router       *gin.Engine
+	stateManager  *state.Manager
+	dynamicClient dynamic.Interface
+	httpServer    *http.Server
+	router        *gin.Engine
 }
 
-// NewServer creates a new API server with the given state manager
-func NewServer(stateManager *state.Manager) *Server {
+// NewServer creates a new API server with the given state manager and dynamic client
+func NewServer(stateManager *state.Manager, dynamicClient dynamic.Interface) *Server {
 	// Create Gin router with default middleware (logger and recovery)
 	router := gin.Default()
 
 	// Create server instance
 	server := &Server{
-		stateManager: stateManager,
-		router:       router,
+		stateManager:  stateManager,
+		dynamicClient: dynamicClient,
+		router:        router,
 	}
 
 	// Register routes
@@ -61,8 +64,9 @@ func (s *Server) registerRoutes() {
 	// Health check endpoint
 	s.router.GET("/health", HealthHandler(s.stateManager))
 
-	// DGD configuration endpoint
+	// DGD configuration endpoints
 	s.router.GET("/dgds", DGDsHandler(s.stateManager))
+	s.router.PUT("/dgds", UpdateDGDHandler(s.stateManager, s.dynamicClient))
 
 	// Worker selection endpoint
 	s.router.POST("/select_worker", SelectWorkerHandler(s.stateManager))

@@ -99,7 +99,7 @@ func main() {
 	setupLog.Info("Registered PodReconciler")
 
 	// Create and start HTTP API server in a goroutine
-	apiServer := api.NewServer(stateManager)
+	apiServer := api.NewServer(stateManager, dynamicClient)
 	go func() {
 		setupLog.Info("Starting HTTP API server", "port", httpPort)
 		if err := apiServer.Start(); err != nil {

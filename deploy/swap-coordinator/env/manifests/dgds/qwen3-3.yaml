@@ -1,7 +1,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-2
+  name: qwen3-3
   namespace: swap
   labels:
     runai/queue: swap
@@ -63,9 +63,9 @@ spec:
           - dynamo.swap_aware_router
           args:
           - --endpoint
-          - swap-qwen3-2.backend.generate
+          - swap-qwen3-3.backend.generate
           - --router-namespace
-          - swap-qwen3-2
+          - swap-qwen3-3
           - --swap-aware-routing
           - --swap-coordinator-url
           - http://swap-coordinator-service.dynamo-system.svc.cluster.local:8080
@@ -131,7 +131,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  nvidia.com/selector: qwen3-2-vllmworker
+                  nvidia.com/selector: qwen3-3-vllmworker
               topologyKey: kubernetes.io/hostname
         schedulerName: runai-scheduler
         securityContext:
