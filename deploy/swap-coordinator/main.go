@@ -8,6 +8,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -71,16 +72,25 @@ func main() {
 	}
 	setupLog.Info("Created Kubernetes clientset")
 
+	// Create dynamic client for fetching DGD resources
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		setupLog.Error(err, "Failed to create dynamic client")
+		os.Exit(1)
+	}
+	setupLog.Info("Created dynamic client")
+
 	// Create state manager
 	stateManager := state.NewManager()
 	setupLog.Info("Initialized state manager")
 
 	// Create and register the Pod reconciler
 	reconciler := &controller.PodReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Clientset:    clientset,
-		StateManager: stateManager,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Clientset:     clientset,
+		DynamicClient: dynamicClient,
+		StateManager:  stateManager,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to setup PodReconciler")
@@ -94,15 +104,26 @@ func main() {
 		setupLog.Info("Starting HTTP API server", "port", httpPort)
 		if err := apiServer.Start(); err != nil {
 			setupLog.Error(err, "HTTP API server error")
-			// Note: Start() handles graceful shutdown on signals, so errors here
-			// are unexpected. We log but don't exit as the controller might still be useful.
 		}
 		setupLog.Info("HTTP API server stopped")
 	}()
 
+	// Start the DGD watcher to react to annotation changes
+	dgdWatcher := &controller.DGDWatcher{
+		DynamicClient: dynamicClient,
+		StateManager:  stateManager,
+	}
+	ctx := ctrl.SetupSignalHandler()
+	go func() {
+		if err := dgdWatcher.Start(ctx); err != nil {
+			setupLog.Error(err, "DGD watcher error")
+		}
+	}()
+	setupLog.Info("Started DGD watcher")
+
 	// Start the controller manager
 	setupLog.Info("Starting controller manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Controller manager error")
 		os.Exit(1)
 	}

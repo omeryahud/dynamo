@@ -13,7 +13,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,6 +28,13 @@ import (
 )
 
 const swapGroupLabelKey = "run.ai/swap-group-instance-uuid"
+const dgdNameLabelKey = "nvidia.com/dynamo-graph-deployment-name"
+
+var dgdGVR = schema.GroupVersionResource{
+	Group:    "nvidia.com",
+	Version:  "v1alpha1",
+	Resource: "dynamographdeployments",
+}
 
 // instanceIDPattern matches instance_id in worker logs.
 // Covers both structured tracing fields (instance_id=N) and
@@ -37,9 +47,10 @@ var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 // PodReconciler reconciles Pods that carry the swap-group-instance-uuid label
 type PodReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	Clientset    kubernetes.Interface
-	StateManager *state.Manager
+	Scheme        *runtime.Scheme
+	Clientset     kubernetes.Interface
+	DynamicClient dynamic.Interface
+	StateManager  *state.Manager
 }
 
 func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -72,7 +83,14 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	if err := r.StateManager.RegisterWorker(instanceID, swapGroupInstanceUUID, pod.Name, pod.Namespace); err != nil {
+	// Read DGD name from pod label and fetch DGD annotations
+	dgdName := pod.Labels[dgdNameLabelKey]
+	dgdNamespace := pod.Namespace
+	if dgdName != "" && r.DynamicClient != nil {
+		r.fetchAndStoreDGDConfig(ctx, dgdName, dgdNamespace)
+	}
+
+	if err := r.StateManager.RegisterWorker(instanceID, swapGroupInstanceUUID, pod.Name, pod.Namespace, dgdName, dgdNamespace); err != nil {
 		logger.Error(err, "Failed to register worker",
 			"instanceID", instanceID,
 			"swapGroupInstanceUUID", swapGroupInstanceUUID,
@@ -85,9 +103,40 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 		"instanceID", instanceID,
 		"swapGroupInstanceUUID", swapGroupInstanceUUID,
 		"podName", pod.Name,
-		"namespace", pod.Namespace)
+		"namespace", pod.Namespace,
+		"dgdName", dgdName)
 
 	return reconcile.Result{}, nil
+}
+
+// fetchAndStoreDGDConfig fetches the DGD resource via dynamic client and stores
+// the min/max warm worker annotations in the state manager
+func (r *PodReconciler) fetchAndStoreDGDConfig(ctx context.Context, dgdName, dgdNamespace string) {
+	logger := log.FromContext(ctx)
+
+	dgd, err := r.DynamicClient.Resource(dgdGVR).Namespace(dgdNamespace).Get(ctx, dgdName, metav1.GetOptions{})
+	if err != nil {
+		logger.Info("Failed to fetch DGD resource", "dgdName", dgdName, "namespace", dgdNamespace, "error", err)
+		return
+	}
+
+	annotations := dgd.GetAnnotations()
+	minWarm := 0
+	maxWarm := 0
+
+	if v, ok := annotations["swap-coordinator/min-warm-workers"]; ok {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			minWarm = parsed
+		}
+	}
+	if v, ok := annotations["swap-coordinator/max-warm-workers"]; ok {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			maxWarm = parsed
+		}
+	}
+
+	r.StateManager.SetDGDConfig(dgdName, dgdNamespace, minWarm, maxWarm)
+	logger.Info("Loaded DGD config", "dgdName", dgdName, "namespace", dgdNamespace, "minWarm", minWarm, "maxWarm", maxWarm)
 }
 
 // extractInstanceIDFromLogs fetches the pod's logs and parses the instance_id

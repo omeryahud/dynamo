@@ -20,6 +20,10 @@ type SelectWorkerResponse struct {
 	SelectedInstanceID uint64 `json:"selected_instance_id"`
 	SelectedDPRank     int    `json:"selected_dp_rank"`
 	Reason             string `json:"reason"`
+	DGDName            string `json:"dgd_name,omitempty"`
+	WarmCount          int    `json:"warm_count,omitempty"`
+	MinWarm            int    `json:"min_warm,omitempty"`
+	MaxWarm            int    `json:"max_warm,omitempty"`
 }
 
 // HealthResponse contains the health status of the swap coordinator
@@ -35,6 +39,16 @@ type StateWorker struct {
 	PodName    string `json:"pod_name"`
 	Namespace  string `json:"namespace"`
 	IsWarm     bool   `json:"is_warm"`
+	DGDName    string `json:"dgd_name,omitempty"`
+}
+
+// StateDGD represents a DGD in the state snapshot
+type StateDGD struct {
+	Name           string `json:"name"`
+	Namespace      string `json:"namespace"`
+	MinWarmWorkers int    `json:"min_warm_workers"`
+	MaxWarmWorkers int    `json:"max_warm_workers"`
+	CurrentWarm    int    `json:"current_warm"`
 }
 
 // StateSwapGroup represents a swap group in the state snapshot

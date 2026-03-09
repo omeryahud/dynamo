@@ -61,6 +61,9 @@ func (s *Server) registerRoutes() {
 	// Health check endpoint
 	s.router.GET("/health", HealthHandler(s.stateManager))
 
+	// DGD configuration endpoint
+	s.router.GET("/dgds", DGDsHandler(s.stateManager))
+
 	// Worker selection endpoint
 	s.router.POST("/select_worker", SelectWorkerHandler(s.stateManager))
 }

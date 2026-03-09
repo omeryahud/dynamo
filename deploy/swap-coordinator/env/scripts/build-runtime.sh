@@ -5,27 +5,18 @@ DYNAMO_IMAGE="dynamo:latest-vllm-runtime"
 SC_IMAGE="swap-coordinator:latest"
 EXPORT_DIR="$HOME/dynamo"
 SERVERS=("gpu-node-1" "gpu-node-2" "gpu-node-3" "gpu-node-4")
-REMOTE_DIR="/tmp/dynamo"
+NFS_MOUNT="/mnt/dynamo"
 
 REPO_ROOT=~/go/src/github.com/omeryahud/dynamo
 
-deploy_to_server() {
+import_on_server() {
     local server="$1"
-    local tar_file="$2"
-    local remote_file="$REMOTE_DIR/$(basename "$tar_file")"
-    local log_prefix="[$server][$(basename "$tar_file")]"
+    local tar_name="$2"
+    local nfs_path="$NFS_MOUNT/$tar_name"
+    local log_prefix="[$server][$tar_name]"
 
-    echo "$log_prefix Creating remote directory..."
-    ssh "$server" "mkdir -p $REMOTE_DIR"
-
-    echo "$log_prefix Copying image via rsync..."
-    rsync -az --info=progress2 "$tar_file" "$server:$remote_file"
-
-    echo "$log_prefix Loading into k8s.io namespace..."
-    ssh "$server" "sudo ctr --namespace k8s.io images import $remote_file"
-
-    echo "$log_prefix Cleaning up remote tar..."
-    ssh "$server" "rm -f $remote_file"
+    echo "$log_prefix Importing from NFS mount..."
+    ssh "$server" "sudo ctr --namespace k8s.io images import $nfs_path"
 
     echo "$log_prefix Done."
 }
@@ -44,7 +35,7 @@ echo "==> Save complete ($(du -sh "$SC_TAR" | cut -f1))"
 
 pids=()
 for server in "${SERVERS[@]}"; do
-    deploy_to_server "$server" "$SC_TAR" &
+    import_on_server "$server" "swap-coordinator.tar" &
     pids+=($!)
 done
 
@@ -75,7 +66,7 @@ echo "==> Save complete ($(du -sh "$DYNAMO_TAR" | cut -f1))"
 
 pids=()
 for server in "${SERVERS[@]}"; do
-    deploy_to_server "$server" "$DYNAMO_TAR" &
+    import_on_server "$server" "dynamo-vllm-runtime.tar" &
     pids+=($!)
 done
 

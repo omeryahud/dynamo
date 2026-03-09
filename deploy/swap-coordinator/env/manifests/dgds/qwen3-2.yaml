@@ -5,6 +5,9 @@ metadata:
   namespace: swap
   labels:
     runai/queue: swap
+  annotations:
+    swap-coordinator/min-warm-workers: "2"
+    swap-coordinator/max-warm-workers: "2"
 spec:
   services:
 

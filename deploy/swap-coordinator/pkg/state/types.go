@@ -16,8 +16,22 @@ type WorkerMetadata struct {
 	// Namespace is the Kubernetes namespace where the worker pod is running
 	Namespace string
 
+	// DGDName is the DynamoGraphDeployment name this worker belongs to
+	DGDName string
+
+	// DGDNamespace is the namespace of the DynamoGraphDeployment
+	DGDNamespace string
+
 	// LastSeenAt is the timestamp when the worker was last seen (registered or heartbeat)
 	LastSeenAt time.Time
+}
+
+// DGDConfig holds min/max warm worker configuration for a DynamoGraphDeployment
+type DGDConfig struct {
+	Name           string
+	Namespace      string
+	MinWarmWorkers int
+	MaxWarmWorkers int
 }
 
 // SwapGroupInstanceState represents the state of a swap group instance

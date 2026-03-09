@@ -29,6 +29,7 @@ func StateHandler(stateManager *state.Manager) gin.HandlerFunc {
 				if meta := stateManager.GetWorkerMetadata(wid); meta != nil {
 					sw.PodName = meta.PodName
 					sw.Namespace = meta.Namespace
+					sw.DGDName = meta.DGDName
 				}
 				workers = append(workers, sw)
 			}
@@ -101,9 +102,31 @@ func HealthHandler(stateManager *state.Manager) gin.HandlerFunc {
 	}
 }
 
+// DGDsHandler handles GET /dgds requests
+// Returns all DGD configurations with current warm counts
+func DGDsHandler(stateManager *state.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		configs := stateManager.ListDGDConfigs()
+
+		dgds := make([]StateDGD, 0, len(configs))
+		for _, cfg := range configs {
+			dgds = append(dgds, StateDGD{
+				Name:           cfg.Name,
+				Namespace:      cfg.Namespace,
+				MinWarmWorkers: cfg.MinWarmWorkers,
+				MaxWarmWorkers: cfg.MaxWarmWorkers,
+				CurrentWarm:    stateManager.CountWarmWorkersForDGD(cfg.Name, cfg.Namespace),
+			})
+		}
+
+		c.JSON(http.StatusOK, dgds)
+	}
+}
+
 // SelectWorkerHandler handles POST /select_worker requests
 // Implements swap-group-aware worker selection: prefers workers whose model
 // is already warm on their swap-group-instance.
+// Enforces DGD min/max warm worker annotations.
 func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var request SelectWorkerRequest
@@ -126,34 +149,85 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 
 		logger := handlerLog.WithValues("requestID", request.RequestID, "candidates", len(request.Workers))
 
-		// Try to find a warm match
-		var selected *WorkerCandidate
-		var selectedSwapGroupUUID string
-		reason := "no-warm-match"
-
-		for i := range request.Workers {
-			candidate := &request.Workers[i]
-			swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
-			if err != nil {
-				logger.V(1).Info("Candidate not registered with coordinator",
-					"instanceID", candidate.InstanceID, "dpRank", candidate.DPRank)
-				continue
-			}
-			swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
-			if swapGroupState != nil && swapGroupState.WarmInstanceID == candidate.InstanceID {
-				selected = candidate
-				selectedSwapGroupUUID = swapGroupUUID
-				reason = "warm-model"
-				logger.Info("Selected warm worker",
-					"instanceID", candidate.InstanceID,
-					"dpRank", candidate.DPRank,
-					"swapGroup", swapGroupUUID)
+		// Identify DGD from the first registered candidate
+		var dgdName, dgdNamespace string
+		var dgdConfig *state.DGDConfig
+		warmCount := 0
+		for _, w := range request.Workers {
+			dgdName, dgdNamespace = stateManager.GetWorkerDGD(w.InstanceID)
+			if dgdName != "" {
 				break
 			}
 		}
+		if dgdName != "" {
+			dgdConfig = stateManager.GetDGDConfig(dgdName, dgdNamespace)
+			warmCount = stateManager.CountWarmWorkersForDGD(dgdName, dgdNamespace)
+		}
 
-		// Fall back: prefer a swap group with no warm instance (cold) to avoid
-		// evicting another model's warm worker and causing unnecessary swaps.
+		maxWarm := 0
+		minWarm := 0
+		if dgdConfig != nil {
+			maxWarm = dgdConfig.MaxWarmWorkers
+			minWarm = dgdConfig.MinWarmWorkers
+		}
+
+		// Tier 1: Try to find a warm match
+		// Skip if below min-warm — force Tier 2 to warm up additional swap groups
+		var selected *WorkerCandidate
+		var selectedSwapGroupUUID string
+		reason := "no-warm-match"
+		belowMin := minWarm > 0 && warmCount < minWarm
+
+		if !belowMin {
+			for i := range request.Workers {
+				candidate := &request.Workers[i]
+				swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
+				if err != nil {
+					logger.V(1).Info("Candidate not registered with coordinator",
+						"instanceID", candidate.InstanceID, "dpRank", candidate.DPRank)
+					continue
+				}
+				swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
+				if swapGroupState != nil && swapGroupState.WarmInstanceID == candidate.InstanceID {
+					selected = candidate
+					selectedSwapGroupUUID = swapGroupUUID
+					reason = "warm-model"
+					logger.Info("Selected warm worker",
+						"instanceID", candidate.InstanceID,
+						"dpRank", candidate.DPRank,
+						"swapGroup", swapGroupUUID)
+					break
+				}
+			}
+		} else {
+			logger.Info("Below min-warm, skipping Tier 1 to warm additional workers",
+				"dgdName", dgdName, "warmCount", warmCount, "minWarm", minWarm)
+		}
+
+		// canEvict checks whether evicting the warm instance from a swap group
+		// is safe — i.e., it won't drop the victim's DGD below its min-warm.
+		// Returns true if the swap group is cold, the warm instance is one of
+		// our own candidates, or the victim's DGD can afford to lose a warm worker.
+		canEvict := func(swapGroupState *state.SwapGroupInstanceState) bool {
+			if swapGroupState.WarmInstanceID == 0 {
+				return true // already cold
+			}
+			victimDGDName, victimDGDNS := stateManager.GetWorkerDGD(swapGroupState.WarmInstanceID)
+			if victimDGDName == "" {
+				return true // no DGD, safe to evict
+			}
+			if victimDGDName == dgdName && victimDGDNS == dgdNamespace {
+				return true // same DGD, not losing a warm worker
+			}
+			victimConfig := stateManager.GetDGDConfig(victimDGDName, victimDGDNS)
+			if victimConfig == nil || victimConfig.MinWarmWorkers <= 0 {
+				return true // no min constraint
+			}
+			victimWarmCount := stateManager.CountWarmWorkersForDGD(victimDGDName, victimDGDNS)
+			return victimWarmCount > victimConfig.MinWarmWorkers
+		}
+
+		// Tier 2: Fall back — prefer cold swap groups, with max-warm enforcement
 		if selected == nil {
 			// Build set of our candidate instance IDs for quick lookup
 			candidateSet := make(map[uint64]bool, len(request.Workers))
@@ -161,41 +235,128 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 				candidateSet[w.InstanceID] = true
 			}
 
-			for i := range request.Workers {
-				candidate := &request.Workers[i]
-				swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
-				if err != nil {
-					continue
+			// If max > 0 and warmCount >= max, skip cold-swap-group tier
+			// and only allow reusing a swap group that already has one of our DGD's workers warm
+			maxReached := maxWarm > 0 && warmCount >= maxWarm
+
+			if maxReached {
+				// Find a candidate whose swap group already has one of our DGD's workers warm
+				for i := range request.Workers {
+					candidate := &request.Workers[i]
+					swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
+					if err != nil {
+						continue
+					}
+					swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
+					if swapGroupState == nil {
+						continue
+					}
+					if swapGroupState.WarmInstanceID != 0 {
+						warmDGDName, warmDGDNS := stateManager.GetWorkerDGD(swapGroupState.WarmInstanceID)
+						if warmDGDName == dgdName && warmDGDNS == dgdNamespace {
+							selected = candidate
+							selectedSwapGroupUUID = swapGroupUUID
+							reason = "max-warm-reuse"
+							break
+						}
+					}
 				}
-				swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
-				if swapGroupState == nil {
-					continue
+			} else {
+				// Pass 1: prefer truly cold swap groups, or same-model groups when not below min.
+				// When below min, same-model reuse doesn't increase warm count, so skip it —
+				// we need to pick a swap group where we'd actually create a NEW warm instance.
+				for i := range request.Workers {
+					candidate := &request.Workers[i]
+					swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
+					if err != nil {
+						continue
+					}
+					swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
+					if swapGroupState == nil {
+						continue
+					}
+					if swapGroupState.WarmInstanceID == 0 {
+						// Truly cold — always good
+						selected = candidate
+						selectedSwapGroupUUID = swapGroupUUID
+						reason = "cold-swap-group"
+						break
+					}
+					if !belowMin && candidateSet[swapGroupState.WarmInstanceID] {
+						// Same model already warm — reuse only if not trying to grow warm count
+						selected = candidate
+						selectedSwapGroupUUID = swapGroupUUID
+						reason = "cold-swap-group"
+						break
+					}
 				}
-				// Prefer a swap group that is cold (no warm instance) or where
-				// the warm instance is one of our own candidates (same model)
-				if swapGroupState.WarmInstanceID == 0 || candidateSet[swapGroupState.WarmInstanceID] {
-					selected = candidate
-					selectedSwapGroupUUID = swapGroupUUID
-					reason = "cold-swap-group"
-					break
+				// Pass 2: if no cold/same-model found, pick one where eviction is safe
+				if selected == nil {
+					for i := range request.Workers {
+						candidate := &request.Workers[i]
+						swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
+						if err != nil {
+							continue
+						}
+						swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
+						if swapGroupState == nil {
+							continue
+						}
+						if canEvict(swapGroupState) {
+							selected = candidate
+							selectedSwapGroupUUID = swapGroupUUID
+							reason = "safe-eviction"
+							break
+						}
+					}
 				}
 			}
 
-			// Last resort: all swap groups have a different model warm, must evict
+			// Tier 3: Last resort — no safe eviction possible, must evict anyway
 			if selected == nil {
-				selected = &request.Workers[0]
-				swapGroupUUID, err := stateManager.GetSwapGroupInstance(selected.InstanceID)
-				if err == nil {
-					selectedSwapGroupUUID = swapGroupUUID
+				// If we were below min but couldn't find a safe eviction,
+				// fall back to Tier 1 (use existing warm worker) rather than
+				// violating another DGD's min.
+				if belowMin {
+					for i := range request.Workers {
+						candidate := &request.Workers[i]
+						swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
+						if err != nil {
+							continue
+						}
+						swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
+						if swapGroupState != nil && swapGroupState.WarmInstanceID == candidate.InstanceID {
+							selected = candidate
+							selectedSwapGroupUUID = swapGroupUUID
+							reason = "warm-model-min-blocked"
+							break
+						}
+					}
 				}
-				reason = "forced-swap"
+				// Absolute last resort
+				if selected == nil {
+					selected = &request.Workers[0]
+					swapGroupUUID, err := stateManager.GetSwapGroupInstance(selected.InstanceID)
+					if err == nil {
+						selectedSwapGroupUUID = swapGroupUUID
+					}
+					if maxReached {
+						reason = "max-warm-reached"
+					} else {
+						reason = "forced-swap"
+					}
+				}
 			}
 
 			logger.Info("No warm match, selected fallback",
 				"reason", reason,
 				"instanceID", selected.InstanceID,
 				"dpRank", selected.DPRank,
-				"swapGroup", selectedSwapGroupUUID)
+				"swapGroup", selectedSwapGroupUUID,
+				"dgdName", dgdName,
+				"warmCount", warmCount,
+				"minWarm", minWarm,
+				"maxWarm", maxWarm)
 		}
 
 		// Update the warm instance for the selected worker's swap group
@@ -207,6 +368,10 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 			SelectedInstanceID: selected.InstanceID,
 			SelectedDPRank:     selected.DPRank,
 			Reason:             reason,
+			DGDName:            dgdName,
+			WarmCount:          warmCount,
+			MinWarm:            minWarm,
+			MaxWarm:            maxWarm,
 		})
 	}
 }
