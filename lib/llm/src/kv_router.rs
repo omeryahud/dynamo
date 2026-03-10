@@ -58,7 +58,7 @@ use crate::{
             RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
             compute_block_hash_for_seq,
         },
-        scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, RankedWorker, SchedulingRequest},
+        scheduler::{KvScheduler, PotentialLoad, RankedWorker},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -563,19 +563,20 @@ impl KvRouter {
         router_config_override: Option<&RouterConfigOverride>,
     ) -> Result<Vec<RankedWorker>> {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos);
+        let block_hashes =
+            compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos, None);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
+            None,
         );
 
         let loads = self
             .scheduler
-            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores.clone())
-            .await;
+            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores.clone());
 
         Ok(scheduler::rank_workers_from_loads(
             &loads,

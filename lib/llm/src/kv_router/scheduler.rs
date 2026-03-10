@@ -10,8 +10,9 @@ use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::metrics::ROUTER_QUEUE_METRICS;
-use super::protocols::{OverlapScores, WorkerId};
+use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerWithDpRank};
 use super::queue::SchedulerQueue;
+use rand::Rng;
 use super::sequence::{
     ActiveSequencesMulti, SequenceError, SequenceRequest, create_multi_worker_sequences,
 };
@@ -28,72 +29,13 @@ use std::time::Instant;
 
 use dynamo_tokens::SequenceHash;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PotentialLoad {
-    pub worker_id: WorkerId,
-    pub dp_rank: DpRank,
-    pub potential_prefill_tokens: usize,
-    pub potential_decode_blocks: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RankedWorker {
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub potential_prefill_tokens: usize,
     pub potential_decode_blocks: usize,
     pub logit: f64,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum KvSchedulerError {
-    #[error("no endpoints available to route work")]
-    NoEndpoints,
-
-    #[error("endpoint subscriber shutdown")]
-    SubscriberShutdown,
-
-    #[error("failed to initialize event publisher: {0}")]
-    InitFailed(String),
-}
-
-#[derive(Debug)]
-pub struct SchedulingResponse {
-    pub best_worker: WorkerWithDpRank,
-    pub overlap_blocks: u32,
-}
-
-pub struct SchedulingRequest {
-    pub maybe_request_id: Option<String>,
-    pub token_seq: Option<Vec<SequenceHash>>,
-    pub isl_tokens: usize,
-    pub overlaps: OverlapScores,
-    pub decode_blocks: HashMap<WorkerWithDpRank, usize>,
-    pub prefill_tokens: HashMap<WorkerWithDpRank, usize>,
-    // Router config overrides for this specific request
-    pub router_config_override: Option<RouterConfigOverride>,
-    // Whether to update scheduler states (false for query_instance_id requests)
-    pub update_states: bool,
-    // LORA adapter name extracted from request.model field
-    pub lora_name: Option<String>,
-    /// Priority jump in seconds; decreases effective arrival time in the queue.
-    pub priority_jump: f64,
-    // Option to take it out to send the response without moving the struct
-    resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
-}
-
-impl SchedulingRequest {
-    pub fn respond(&mut self, response: SchedulingResponse) {
-        // Changed to &mut self
-        if let Some(tx) = self.resp_tx.take() {
-            // Use take() to extract the sender
-            if tx.send(response).is_err() {
-                tracing::error!("failed to send response to requestor");
-            }
-        } else {
-            tracing::error!("respond called multiple times on same request");
-        }
-    }
 }
 
 pub struct KvScheduler {
@@ -528,143 +470,6 @@ fn softmax_sample(
 
     // Fallback to last key (shouldn't normally reach here)
     vec![keys[keys.len() - 1]]
-}
-
-// Default implementation matching the Python _cost_function
-#[derive(Debug, Clone, Default)]
-pub struct DefaultWorkerSelector {
-    pub kv_router_config: KvRouterConfig,
-}
-
-impl DefaultWorkerSelector {
-    pub fn new(kv_router_config: Option<KvRouterConfig>) -> Self {
-        Self {
-            kv_router_config: kv_router_config.unwrap_or_default(),
-        }
-    }
-}
-
-impl WorkerSelector for DefaultWorkerSelector {
-    fn select_worker(
-        &self,
-        workers: &HashMap<WorkerId, ModelRuntimeConfig>,
-        request: &SchedulingRequest,
-        block_size: u32,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        assert!(request.isl_tokens > 0);
-
-        if workers.is_empty() {
-            return Err(KvSchedulerError::NoEndpoints);
-        }
-
-        let isl = request.isl_tokens;
-        let request_blocks = isl.div_ceil(block_size as usize);
-        let overlaps = &request.overlaps.scores;
-
-        let decode_blocks = &request.decode_blocks;
-        let prefill_tokens = &request.prefill_tokens;
-
-        let mut worker_logits = HashMap::new();
-
-        // Use override if provided, otherwise use default config
-        let overlap_weight = request
-            .router_config_override
-            .as_ref()
-            .and_then(|cfg| cfg.overlap_score_weight)
-            .unwrap_or(self.kv_router_config.overlap_score_weight);
-
-        // Calculate logits for each worker with dp_rank
-        // Outer loop: iterate over all workers from runtime config
-        // Inner loop: iterate over all dp_ranks for each worker
-        for (worker_id, config) in workers.iter() {
-            let data_parallel_size = config.data_parallel_size;
-
-            for dp_rank in 0..data_parallel_size {
-                let worker = WorkerWithDpRank::new(*worker_id, dp_rank);
-
-                // Get overlap for this worker (defaults to 0 if not in overlaps)
-                let overlap = *overlaps.get(&worker).unwrap_or(&0);
-
-                // this is the number of prefill tokens the worker would have if the request were scheduled there
-                let prefill_token = *prefill_tokens.get(&worker).unwrap_or(&isl);
-                let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
-
-                // this is the number of decode blocks the worker would have if the request were scheduled there
-                let decode_block = *decode_blocks
-                    .get(&worker)
-                    .unwrap_or(&(potential_prefill_block.floor() as usize))
-                    as f64;
-
-                // Calculate logit (lower is better)
-                let logit = compute_logit(
-                    prefill_token as f64,
-                    decode_block,
-                    block_size as f64,
-                    overlap_weight,
-                );
-
-                worker_logits.insert(worker, logit);
-
-                tracing::info!(
-                    "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
-                     = {overlap_weight:.1} * prefill_blocks + decode_blocks \
-                     = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
-                    worker.worker_id,
-                    worker.dp_rank
-                );
-            }
-        }
-
-        // Use softmax sampling to select worker(s)
-        // Use override if provided, otherwise use default config
-        let temperature = request
-            .router_config_override
-            .as_ref()
-            .and_then(|cfg| cfg.router_temperature)
-            .unwrap_or(self.kv_router_config.router_temperature);
-        let candidates = softmax_sample(&worker_logits, temperature);
-
-        // If multiple candidates (tied), use tree size as tie-breaker
-        // If tree sizes are also equal, use random selection to avoid bias
-        if candidates.len() > 1 {
-            tracing::info!("Multiple workers tied with same logit, using tree size as tie-breaker");
-        }
-        let best_worker = break_softmax_ties(candidates, &request.overlaps);
-
-        let best_logit = worker_logits[&best_worker];
-
-        let best_overlap = *overlaps.get(&best_worker).unwrap_or(&0);
-
-        // this is a runtime config set on a per worker basis, not per dp-rank
-        let total_blocks_info = workers
-            .get(&best_worker.worker_id)
-            .and_then(|cfg| cfg.total_kv_blocks)
-            .map(|blocks| format!(", total blocks: {}", blocks))
-            .unwrap_or_default();
-
-        let tree_size = request
-            .overlaps
-            .tree_sizes
-            .get(&best_worker)
-            .copied()
-            .unwrap_or(0);
-
-        tracing::info!(
-            "Selected worker: worker_id={} dp_rank={:?}, logit: {:.3}, cached blocks: {}, tree size: {}{}",
-            best_worker.worker_id,
-            best_worker.dp_rank,
-            best_logit,
-            best_overlap,
-            tree_size,
-            total_blocks_info
-        );
-
-        Ok(WorkerSelectionResult {
-            worker: best_worker,
-            required_blocks: request_blocks as u64,
-            overlap_blocks: overlaps.get(&best_worker).copied().unwrap_or(0),
-        })
-    }
 }
 
 #[cfg(test)]
