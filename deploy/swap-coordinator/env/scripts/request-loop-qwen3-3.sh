@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Sends requests to qwen3-3 in a loop
-# Maintains port-forwarding automatically
+# Sends requests to qwen3-3 in a loop simulating multi-turn conversations.
+# Each conversation: random 100-char initial prompt, then 5 follow-ups appending 50 chars each.
 set -euo pipefail
 
 LOCAL_PORT=8002
@@ -24,14 +24,25 @@ ensure_port_forward() {
 
 URL="http://localhost:$LOCAL_PORT/v1/chat/completions"
 i=0
+FOLLOWUPS=5
+
+rand_str() { head -c "$1" /dev/urandom | base64 | tr -dc 'a-zA-Z0-9 ' | head -c "$1"; }
 
 while true; do
   ensure_port_forward
-  i=$((i + 1))
-  echo -n "[qwen3-3] Request #$i: "
-  curl -s --max-time 30 "$URL" \
-    -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Count to $i\"}],\"max_tokens\":10}" \
-    | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'][:60])" 2>/dev/null \
-    || echo "FAILED"
+  prompt="$(rand_str 100)"
+
+  for turn in $(seq 0 "$FOLLOWUPS"); do
+    if [ "$turn" -gt 0 ]; then
+      prompt="${prompt} $(rand_str 50)"
+    fi
+    i=$((i + 1))
+    echo -n "[qwen3-3] Request #$i (turn $turn, ${#prompt} chars): "
+    curl -s --max-time 30 "$URL" \
+      -H 'Content-Type: application/json' \
+      -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":10}" \
+      | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'][:60])" 2>/dev/null \
+      || echo "FAILED"
+  done
+  echo "[qwen3-3] Conversation done, starting new one..."
 done

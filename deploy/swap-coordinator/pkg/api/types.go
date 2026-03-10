@@ -35,11 +35,12 @@ type HealthResponse struct {
 // StateWorker represents a worker in the state snapshot
 // InstanceID is serialized as a string to preserve precision in JavaScript
 type StateWorker struct {
-	InstanceID string `json:"instance_id"`
-	PodName    string `json:"pod_name"`
-	Namespace  string `json:"namespace"`
-	IsWarm     bool   `json:"is_warm"`
-	DGDName    string `json:"dgd_name,omitempty"`
+	InstanceID string   `json:"instance_id"`
+	PodName    string   `json:"pod_name"`
+	Namespace  string   `json:"namespace"`
+	IsWarm     bool     `json:"is_warm"`
+	DGDName    string   `json:"dgd_name,omitempty"`
+	Logit      *float64 `json:"logit,omitempty"`
 }
 
 // StateDGD represents a DGD in the state snapshot

@@ -39,6 +39,7 @@ const dashboardHTML = `<!DOCTYPE html>
   .worker .info { flex: 1; min-width: 0; }
   .worker .pod-name { font-size: 13px; font-weight: 500; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .worker .instance-id { font-size: 11px; color: #64748b; font-family: monospace; }
+  .worker .logit-label { font-size: 11px; color: #94a3b8; font-family: monospace; }
   .worker .dgd-label { font-size: 10px; }
   .worker .badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
   .empty { color: #475569; font-size: 13px; font-style: italic; text-align: center; padding: 32px; }
@@ -202,6 +203,7 @@ async function refresh() {
         html += '<div class="info">';
         html += '<div class="pod-name">' + esc(w.pod_name || 'unknown') + '</div>';
         html += '<div class="instance-id">' + w.instance_id + '</div>';
+        if (w.logit != null) html += '<div class="logit-label">logit: ' + w.logit.toFixed(3) + '</div>';
         if (w.dgd_name) html += '<div class="dgd-label" style="color:' + col.label + '">' + esc(w.dgd_name) + '</div>';
         html += '</div>';
         html += badgeHtml;

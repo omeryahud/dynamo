@@ -36,6 +36,9 @@ func StateHandler(stateManager *state.Manager) gin.HandlerFunc {
 					sw.Namespace = meta.Namespace
 					sw.DGDName = meta.DGDName
 				}
+				if logit, ok := stateManager.GetWorkerLogit(wid); ok {
+					sw.Logit = &logit
+				}
 				workers = append(workers, sw)
 			}
 			groups = append(groups, StateSwapGroup{
@@ -230,6 +233,17 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 		}
 
 		logger := handlerLog.WithValues("requestID", request.RequestID, "candidates", len(request.Workers))
+
+		// Store latest logits from the router for dashboard display
+		logits := make(map[uint64]float64, len(request.Workers))
+		for _, w := range request.Workers {
+			if w.Logit != 0 {
+				logits[w.InstanceID] = w.Logit
+			}
+		}
+		if len(logits) > 0 {
+			stateManager.UpdateWorkerLogits(logits)
+		}
 
 		// Identify DGD from the first registered candidate
 		var dgdName, dgdNamespace string
