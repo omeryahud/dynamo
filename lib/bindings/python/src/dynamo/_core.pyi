@@ -1591,6 +1591,29 @@ class KvRouter:
         """
         ...
 
+    async def rank_workers(
+        self,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Rank all workers using the full scoring pipeline (same as best_worker).
+
+        Applies: block hashing → overlap finding → logit scoring → softmax selection.
+        Best worker (selected by softmax) is first, remaining sorted by logit ascending.
+
+        Args:
+            token_ids: List of token IDs
+            router_config_override: Optional router configuration override
+            block_mm_infos: Optional block-level multimodal metadata
+
+        Returns:
+            List of worker dicts, best first, each with:
+            worker_id, dp_rank, potential_prefill_tokens, potential_decode_blocks, logit
+        """
+        ...
+
     async def get_potential_loads(
         self,
         token_ids: List[int],

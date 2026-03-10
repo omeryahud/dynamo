@@ -54,7 +54,7 @@ use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::{
         remote_indexer::RemoteIndexer,
-        scheduler::{KvScheduler, PotentialLoad},
+        scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, RankedWorker, SchedulingRequest},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -585,6 +585,38 @@ impl KvRouter {
         Ok(self
             .scheduler
             .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores))
+    }
+
+    /// Rank all workers using the full scoring pipeline (block hashing → overlap finding → logit scoring → softmax selection).
+    /// Best worker (selected by softmax) is first, remaining sorted by logit ascending.
+    pub async fn rank_workers(
+        &self,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+    ) -> Result<Vec<RankedWorker>> {
+        let isl_tokens = tokens.len();
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, block_mm_infos);
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+
+        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
+            tokens,
+            self.block_size,
+            router_config_override,
+        );
+
+        let loads = self
+            .scheduler
+            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores.clone())
+            .await;
+
+        Ok(scheduler::rank_workers_from_loads(
+            &loads,
+            &overlap_scores,
+            self.block_size,
+            router_config_override,
+            &self.kv_router_config,
+        ))
     }
 
     /// Dump all events from the indexer

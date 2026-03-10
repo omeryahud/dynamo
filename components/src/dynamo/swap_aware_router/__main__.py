@@ -46,7 +46,6 @@ class StandaloneRouterHandler:
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
-        self.overlap_score_weight = overlap_score_weight
         self.swap_aware_routing = swap_aware_routing
         self.swap_coordinator_url = swap_coordinator_url
         self.swap_coordinator_timeout = swap_coordinator_timeout
@@ -116,6 +115,8 @@ class StandaloneRouterHandler:
         try:
             # Build request payload matching SwapCoordinator API contract
             # Extract instance_id from worker metadata (if available)
+            # ranked_workers already contains logit from Rust-side rank_workers()
+            # and is sorted best-first; pass through directly with instance_id mapping
             worker_candidates = []
             for worker in workers:
                 candidate = {
@@ -123,16 +124,9 @@ class StandaloneRouterHandler:
                     "dp_rank": worker["dp_rank"],
                     "potential_prefill_tokens": worker["potential_prefill_tokens"],
                     "potential_decode_blocks": worker["potential_decode_blocks"],
+                    "logit": worker["logit"],
                 }
                 worker_candidates.append(candidate)
-
-            # Compute KvRouter-equivalent logit per candidate and sort (best first)
-            # logit = overlap_weight * (prefill_tokens / block_size) + decode_blocks
-            for candidate in worker_candidates:
-                prefill_blocks = candidate["potential_prefill_tokens"] / self.block_size
-                candidate["logit"] = self.overlap_score_weight * prefill_blocks + candidate["potential_decode_blocks"]
-
-            worker_candidates.sort(key=lambda w: w["logit"])
 
             payload = {
                 "workers": worker_candidates,
@@ -199,10 +193,11 @@ class StandaloneRouterHandler:
             try:
                 token_ids = request.get("token_ids", [])
 
-                # Query potential loads for all workers
-                potential_loads = await self.kv_push_router.get_potential_loads(token_ids)
+                # rank_workers() returns all workers ranked with logits:
+                # best worker (softmax-selected) is first, remaining sorted by logit ascending.
+                ranked_workers = await self.kv_push_router.rank_workers(token_ids)
 
-                if not potential_loads:
+                if not ranked_workers:
                     logger.warning(
                         "Swap-aware routing enabled but no workers available. "
                         "Falling back to default routing."
@@ -215,7 +210,7 @@ class StandaloneRouterHandler:
                     if self.swap_coordinator_url:
                         request_id = request.get("request_id", f"req-{id(request)}")
                         coordinator_result = await self._call_swap_coordinator(
-                            potential_loads, request_id
+                            ranked_workers, request_id
                         )
 
                         if coordinator_result:
@@ -223,8 +218,8 @@ class StandaloneRouterHandler:
                             selected_instance_id = coordinator_result["selected_instance_id"]
                             selected_dp_rank = coordinator_result["selected_dp_rank"]
 
-                            # Find the matching worker in potential_loads
-                            for worker in potential_loads:
+                            # Find the matching worker in ranked_workers
+                            for worker in ranked_workers:
                                 if (worker["worker_id"] == selected_instance_id and
                                     worker["dp_rank"] == selected_dp_rank):
                                     best_worker = worker
@@ -235,16 +230,12 @@ class StandaloneRouterHandler:
                                 logger.warning(
                                     f"SwapCoordinator selected instance_id={selected_instance_id} "
                                     f"dp_rank={selected_dp_rank}, but worker not found in "
-                                    f"potential_loads. Falling back to local selection."
+                                    f"ranked_workers. Falling back to local selection."
                                 )
 
-                    # Fall back to local selection if SwapCoordinator unavailable or failed
+                    # Fall back to local selection: rank_workers() already placed the best worker first
                     if not best_worker:
-                        def _logit(w):
-                            prefill_blocks = w["potential_prefill_tokens"] / self.block_size
-                            return self.overlap_score_weight * prefill_blocks + w["potential_decode_blocks"]
-
-                        best_worker = min(potential_loads, key=_logit)
+                        best_worker = ranked_workers[0]
                         selection_source = "local"
 
                     routing = {
