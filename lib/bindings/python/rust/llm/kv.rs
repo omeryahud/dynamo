@@ -928,6 +928,46 @@ impl KvRouter {
         })
     }
 
+    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None))]
+    fn rank_workers<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        block_mm_infos: Option<PyObject>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            let override_config: llm_rs::kv_router::RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
+        } else {
+            None
+        };
+
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
+
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let ranked = chooser
+                .rank_workers(
+                    &token_ids,
+                    block_mm_infos.as_deref(),
+                    router_config_override.as_ref(),
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            Python::with_gil(|py| {
+                pythonize(py, &ranked)
+                    .map(|obj| obj.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
     /// Mark prefill as completed for a request
     fn mark_prefill_complete<'p>(
         &self,
