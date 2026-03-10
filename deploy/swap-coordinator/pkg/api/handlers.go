@@ -267,6 +267,10 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 			minWarm = dgdConfig.MinWarmWorkers
 		}
 
+		// When max=0, this DGD must never warm a swap group.
+		// Pick the first candidate without updating warm state.
+		zeroMax := dgdConfig != nil && dgdConfig.MaxWarmWorkers == 0
+
 		// Tier 1: Try to find a warm match
 		// Skip if below min-warm — force Tier 2 to warm up additional swap groups
 		var selected *WorkerCandidate
@@ -274,7 +278,15 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 		reason := "no-warm-match"
 		belowMin := minWarm > 0 && warmCount < minWarm
 
-		if !belowMin {
+		if zeroMax {
+			// max=0 means this DGD is not allowed to run. Reject the request.
+			logger.Info("DGD max_warm_workers=0, rejecting request",
+				"dgdName", dgdName)
+			c.JSON(http.StatusForbidden, ErrorResponse{
+				Error: fmt.Sprintf("DGD %s/%s has max_warm_workers=0, no workers allowed", dgdNamespace, dgdName),
+			})
+			return
+		} else if !belowMin {
 			for i := range request.Workers {
 				candidate := &request.Workers[i]
 				swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
@@ -456,7 +468,8 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 		}
 
 		// Update the warm instance for the selected worker's swap group
-		if selectedSwapGroupUUID != "" {
+		// Skip if max=0 — this DGD must never warm a swap group
+		if selectedSwapGroupUUID != "" && !zeroMax {
 			stateManager.SetWarmInstance(selectedSwapGroupUUID, selected.InstanceID)
 		}
 

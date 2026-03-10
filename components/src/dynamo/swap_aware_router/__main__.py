@@ -28,6 +28,11 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+class SwapCoordinatorRejectedError(Exception):
+    """Raised when the SwapCoordinator rejects a request (e.g., max_warm_workers=0)."""
+    pass
+
+
 class StandaloneRouterHandler:
     """Handles routing requests to workers using KV-aware routing."""
 
@@ -143,6 +148,12 @@ class StandaloneRouterHandler:
                         f"dp_rank={result['selected_dp_rank']}, reason={result['reason']}"
                     )
                     return result
+                elif response.status == 403:
+                    error_text = await response.text()
+                    logger.warning(
+                        f"SwapCoordinator rejected request (403): {error_text}"
+                    )
+                    raise SwapCoordinatorRejectedError(error_text)
                 elif response.status == 501:
                     # Phase 1 stub - selection not implemented yet
                     logger.debug(
@@ -250,6 +261,8 @@ class StandaloneRouterHandler:
                         f"{best_worker['potential_decode_blocks']} decode blocks"
                     )
 
+            except SwapCoordinatorRejectedError:
+                raise
             except Exception as e:
                 logger.error(
                     f"Failed to apply swap-aware routing: {e}. "
