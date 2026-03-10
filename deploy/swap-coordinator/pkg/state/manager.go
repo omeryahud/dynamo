@@ -29,6 +29,9 @@ type Manager struct {
 	// instanceToDGD maps worker instance IDs to their DGD key ("namespace/name")
 	instanceToDGD map[uint64]string
 
+	// workerLogits stores the last-known routing logit per worker instance
+	workerLogits map[uint64]float64
+
 	// mu protects all maps from concurrent access
 	mu sync.RWMutex
 }
@@ -42,6 +45,7 @@ func NewManager() *Manager {
 		podNameToInstanceID: make(map[string]uint64),
 		dgdConfigs:          make(map[string]*DGDConfig),
 		instanceToDGD:       make(map[uint64]string),
+		workerLogits:        make(map[uint64]float64),
 	}
 }
 
@@ -327,6 +331,25 @@ func (m *Manager) GetWorkerDGD(instanceID uint64) (name, namespace string) {
 		return meta.DGDName, meta.DGDNamespace
 	}
 	return "", ""
+}
+
+// UpdateWorkerLogits stores the latest routing logits for a batch of workers
+func (m *Manager) UpdateWorkerLogits(logits map[uint64]float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for id, logit := range logits {
+		m.workerLogits[id] = logit
+	}
+}
+
+// GetWorkerLogit returns the last-known routing logit for a worker, and whether one exists
+func (m *Manager) GetWorkerLogit(instanceID uint64) (float64, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	logit, ok := m.workerLogits[instanceID]
+	return logit, ok
 }
 
 // GetWorkersInSwapGroup returns a list of instance IDs for all workers in a given swap group
