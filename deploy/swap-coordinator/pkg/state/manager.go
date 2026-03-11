@@ -44,6 +44,9 @@ type Manager struct {
 		Count uint64
 	}
 
+	// lastRoutedWorker stores the last routed worker instance ID per DGD key ("namespace/name")
+	lastRoutedWorker map[string]uint64
+
 	// mu protects all maps from concurrent access
 	mu sync.RWMutex
 }
@@ -58,6 +61,7 @@ func NewManager() *Manager {
 		dgdConfigs:          make(map[string]*DGDConfig),
 		instanceToDGD:       make(map[uint64]string),
 		workerLogits:        make(map[uint64]float64),
+		lastRoutedWorker:    make(map[string]uint64),
 		ttftSamples:         make(map[string][]TTFTSample),
 		frontendPods:        make(map[string]*FrontendPod),
 		lastScrape: make(map[string]struct {
@@ -374,6 +378,21 @@ func (m *Manager) GetWorkerLogit(instanceID uint64) (float64, bool) {
 
 	logit, ok := m.workerLogits[instanceID]
 	return logit, ok
+}
+
+// SetLastRoutedWorker records the last routed worker for a DGD
+func (m *Manager) SetLastRoutedWorker(dgdName, dgdNamespace string, instanceID uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastRoutedWorker[dgdNamespace+"/"+dgdName] = instanceID
+}
+
+// GetLastRoutedWorker returns the last routed worker instance ID for a DGD, and whether one exists
+func (m *Manager) GetLastRoutedWorker(dgdName, dgdNamespace string) (uint64, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	id, ok := m.lastRoutedWorker[dgdNamespace+"/"+dgdName]
+	return id, ok
 }
 
 // RecordTTFTSample appends a TTFT sample for a DGD and prunes samples outside the window

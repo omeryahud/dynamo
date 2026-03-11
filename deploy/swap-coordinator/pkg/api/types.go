@@ -55,6 +55,7 @@ type StateDGD struct {
 	AvgTTFTMS         float64 `json:"avg_ttft_ms"`
 	TTFTSampleCount   int     `json:"ttft_sample_count"`
 	TTFTExceeded      bool    `json:"ttft_exceeded"`
+	LastRoutedWorker  string  `json:"last_routed_worker,omitempty"`
 }
 
 // StateSwapGroup represents a swap group in the state snapshot

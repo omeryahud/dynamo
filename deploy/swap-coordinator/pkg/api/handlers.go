@@ -120,7 +120,7 @@ func DGDsHandler(stateManager *state.Manager) gin.HandlerFunc {
 		for _, cfg := range configs {
 			dgdKey := cfg.Namespace + "/" + cfg.Name
 			avgTTFT, sampleCount := stateManager.GetRollingAvgTTFT(dgdKey)
-			dgds = append(dgds, StateDGD{
+			d := StateDGD{
 				Name:              cfg.Name,
 				Namespace:         cfg.Namespace,
 				MinWarmWorkers:    cfg.MinWarmWorkers,
@@ -131,7 +131,11 @@ func DGDsHandler(stateManager *state.Manager) gin.HandlerFunc {
 				AvgTTFTMS:         avgTTFT,
 				TTFTSampleCount:   sampleCount,
 				TTFTExceeded:      stateManager.IsTTFTExceeded(cfg.Name, cfg.Namespace),
-			})
+			}
+			if lastWorker, ok := stateManager.GetLastRoutedWorker(cfg.Name, cfg.Namespace); ok {
+				d.LastRoutedWorker = fmt.Sprintf("%d", lastWorker)
+			}
+			dgds = append(dgds, d)
 		}
 
 		c.JSON(http.StatusOK, dgds)
@@ -532,6 +536,8 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 		if selectedSwapGroupUUID != "" && !zeroMax {
 			stateManager.SetWarmInstance(selectedSwapGroupUUID, selected.InstanceID)
 		}
+
+		stateManager.SetLastRoutedWorker(dgdName, dgdNamespace, selected.InstanceID)
 
 		c.JSON(http.StatusOK, SelectWorkerResponse{
 			SelectedInstanceID: selected.InstanceID,

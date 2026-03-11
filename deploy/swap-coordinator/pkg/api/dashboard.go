@@ -100,6 +100,13 @@ function ttftInfoHTML(d) {
   return '<span style="color:#475569">TTFT: waiting for data...</span>';
 }
 
+function lastRoutedHTML(d) {
+  if (d.last_routed_worker) {
+    return 'Last routed: <span style="font-family:monospace;color:#e2e8f0">' + esc(d.last_routed_worker) + '</span>';
+  }
+  return '<span style="color:#475569">Last routed: none</span>';
+}
+
 function renderDGDCard(d) {
   const key = dgdKey(d);
   const col = getColor(d.name);
@@ -114,6 +121,10 @@ function renderDGDCard(d) {
   // TTFT metrics display (always rendered, updated dynamically)
   h += '<div class="dgd-ttft-info" id="dgd-ttft-info-' + css(key) + '" style="font-size:12px;margin-bottom:8px;color:#94a3b8">';
   h += ttftInfoHTML(d);
+  h += '</div>';
+  // Last routed worker
+  h += '<div class="dgd-last-routed" id="dgd-last-routed-' + css(key) + '" style="font-size:12px;margin-bottom:8px;color:#94a3b8">';
+  h += lastRoutedHTML(d);
   h += '</div>';
   h += '<div class="dgd-controls">';
   h += '<div class="dgd-control"><label>min</label>';
@@ -145,6 +156,10 @@ function updateDGDCard(d) {
   // Update TTFT info
   const ttftInfo = document.getElementById('dgd-ttft-info-' + key);
   if (ttftInfo) ttftInfo.innerHTML = ttftInfoHTML(d);
+
+  // Update last routed worker
+  const lastRouted = document.getElementById('dgd-last-routed-' + key);
+  if (lastRouted) lastRouted.innerHTML = lastRoutedHTML(d);
 
   return true;
 }
@@ -209,6 +224,14 @@ async function refresh() {
       return;
     }
 
+    // Build set of last-routed instance IDs from DGD data
+    const lastRoutedSet = new Set();
+    if (dgds) {
+      for (const d of dgds) {
+        if (d.last_routed_worker) lastRoutedSet.add(d.last_routed_worker);
+      }
+    }
+
     let totalWorkers = 0;
     let html = '';
     groups.sort((a, b) => a.swap_group_uuid.localeCompare(b.swap_group_uuid));
@@ -223,6 +246,7 @@ async function refresh() {
 
       for (const w of workers) {
         const warm = w.is_warm;
+        const isLastRouted = lastRoutedSet.has(w.instance_id);
         const col = getColor(w.dgd_name || '');
         let workerStyle = '';
         let dotStyle = 'background:' + col.main + '40;';
@@ -231,6 +255,10 @@ async function refresh() {
           workerStyle = 'border-color:' + col.main + ';background:' + col.bg + ';';
           dotStyle = 'background:' + col.main + ';box-shadow:0 0 8px ' + col.glow + ';';
           badgeHtml = '<div class="badge" style="background:' + col.badge + ';color:' + col.light + '">warm</div>';
+        }
+        if (isLastRouted) {
+          workerStyle += 'outline:2px dashed #fbbf24;outline-offset:2px;';
+          badgeHtml += '<div class="badge" style="background:#fbbf2430;color:#fbbf24">last routed</div>';
         }
         html += '<div class="worker" style="' + workerStyle + '" onclick="setWarm(\'' + esc(sg.swap_group_uuid) + '\',\'' + esc(w.instance_id) + '\')">';
         html += '<div class="dot" style="' + dotStyle + '"></div>';
