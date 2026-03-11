@@ -28,10 +28,27 @@ type WorkerMetadata struct {
 
 // DGDConfig holds min/max warm worker configuration for a DynamoGraphDeployment
 type DGDConfig struct {
-	Name           string
-	Namespace      string
-	MinWarmWorkers int
-	MaxWarmWorkers int
+	Name              string
+	Namespace         string
+	MinWarmWorkers    int
+	MaxWarmWorkers    int
+	TTFTThresholdMS   float64 // 0 = disabled
+	TTFTWindowSeconds int     // default 60
+}
+
+// TTFTSample represents a single TTFT measurement interval
+type TTFTSample struct {
+	AvgTTFTMS float64
+	Timestamp time.Time
+}
+
+// FrontendPod represents a frontend pod that exposes metrics
+type FrontendPod struct {
+	PodName   string
+	PodIP     string
+	Port      int
+	DGDName   string
+	Namespace string
 }
 
 // SwapGroupInstanceState represents the state of a swap group instance

@@ -12,17 +12,17 @@ const dashboardHTML = `<!DOCTYPE html>
   h1 { font-size: 22px; margin-bottom: 16px; color: #94a3b8; }
   h2 { font-size: 18px; margin: 24px 0 12px; color: #94a3b8; }
   .status { font-size: 13px; color: #64748b; margin-bottom: 20px; }
-  .dgd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; margin-bottom: 24px; }
-  .dgd-card { background: #1e293b; border-radius: 10px; padding: 14px 16px; border: 2px solid #334155; }
+  .dgd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .dgd-card { background: #1e293b; border-radius: 10px; padding: 14px 16px; border: 2px solid #334155; overflow: hidden; }
   .dgd-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
   .dgd-name { font-size: 15px; font-weight: 600; }
   .dgd-ns { font-size: 11px; color: #64748b; }
   .dgd-warm-badge { font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 6px; }
   .dgd-status-icon { font-size: 11px; margin-left: 6px; }
-  .dgd-controls { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+  .dgd-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
   .dgd-control { display: flex; align-items: center; gap: 6px; }
   .dgd-control label { font-size: 12px; color: #64748b; font-weight: 500; }
-  .dgd-control input { width: 52px; padding: 4px 8px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; font-size: 13px; text-align: center; }
+  .dgd-control input { width: 58px; padding: 4px 6px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; font-size: 13px; text-align: center; }
   .dgd-control input:focus { outline: none; border-color: #60a5fa; }
   .dgd-save { padding: 5px 14px; border-radius: 6px; border: 1px solid #475569; background: #334155; color: #e2e8f0; font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
   .dgd-save:hover { background: #475569; border-color: #60a5fa; }
@@ -83,9 +83,21 @@ function dgdKey(d) { return d.namespace + '/' + d.name; }
 
 function statusInfo(d) {
   const max = d.max_warm_workers, min = d.min_warm_workers, cur = d.current_warm;
+  if (d.ttft_exceeded) return { icon: '\u26a0', text: 'TTFT exceeded' };
   if (max > 0 && cur > max) return { icon: '\u26a0', text: 'over max' };
   if (min > 0 && cur < min) return { icon: '\u25b2', text: 'below min' };
   return { icon: '\u2713', text: 'ok' };
+}
+
+function ttftInfoHTML(d) {
+  if (d.avg_ttft_ms > 0 || d.ttft_threshold_ms > 0) {
+    const ttftColor = d.ttft_exceeded ? '#ef4444' : '#22c55e';
+    let s = 'TTFT: <span style="color:' + ttftColor + ';font-weight:600">' + d.avg_ttft_ms.toFixed(1) + 'ms</span>';
+    if (d.ttft_threshold_ms > 0) s += ' / ' + d.ttft_threshold_ms.toFixed(0) + 'ms threshold';
+    s += ' <span style="color:#64748b">(' + d.ttft_sample_count + ' samples)</span>';
+    return s;
+  }
+  return '<span style="color:#475569">TTFT: waiting for data...</span>';
 }
 
 function renderDGDCard(d) {
@@ -99,11 +111,19 @@ function renderDGDCard(d) {
   h += '<div><span class="dgd-name" style="color:' + col.light + '">' + esc(d.name) + '</span> <span class="dgd-ns">' + esc(d.namespace) + '</span></div>';
   h += '<span class="dgd-warm-badge" id="dgd-badge-' + css(key) + '" style="background:' + col.badge + ';color:' + col.light + '">' + cur + ' warm <span class="dgd-status-icon">' + st.icon + '</span></span>';
   h += '</div>';
+  // TTFT metrics display (always rendered, updated dynamically)
+  h += '<div class="dgd-ttft-info" id="dgd-ttft-info-' + css(key) + '" style="font-size:12px;margin-bottom:8px;color:#94a3b8">';
+  h += ttftInfoHTML(d);
+  h += '</div>';
   h += '<div class="dgd-controls">';
   h += '<div class="dgd-control"><label>min</label>';
   h += '<input type="number" min="0" value="' + d.min_warm_workers + '" id="dgd-min-' + css(key) + '" /></div>';
   h += '<div class="dgd-control"><label>max</label>';
   h += '<input type="number" min="0" value="' + d.max_warm_workers + '" id="dgd-max-' + css(key) + '" /></div>';
+  h += '<div class="dgd-control"><label>TTFT ms</label>';
+  h += '<input type="number" min="0" step="10" value="' + (d.ttft_threshold_ms || 0) + '" id="dgd-ttft-' + css(key) + '" /></div>';
+  h += '<div class="dgd-control"><label>window s</label>';
+  h += '<input type="number" min="10" value="' + (d.ttft_window_seconds || 60) + '" id="dgd-win-' + css(key) + '" /></div>';
   h += '<button class="dgd-save" id="dgd-btn-' + css(key) + '" onclick="saveDGD(\'' + esc(d.name) + '\',\'' + esc(d.namespace) + '\')">Save</button>';
   h += '</div></div>';
   return h;
@@ -121,6 +141,11 @@ function updateDGDCard(d) {
   badge.style.background = col.badge;
   badge.style.color = col.light;
   badge.innerHTML = d.current_warm + ' warm <span class="dgd-status-icon">' + st.icon + '</span>';
+
+  // Update TTFT info
+  const ttftInfo = document.getElementById('dgd-ttft-info-' + key);
+  if (ttftInfo) ttftInfo.innerHTML = ttftInfoHTML(d);
+
   return true;
 }
 
@@ -128,9 +153,14 @@ function cardHasEdits(d) {
   const key = css(dgdKey(d));
   const minEl = document.getElementById('dgd-min-' + key);
   const maxEl = document.getElementById('dgd-max-' + key);
+  const ttftEl = document.getElementById('dgd-ttft-' + key);
+  const winEl = document.getElementById('dgd-win-' + key);
   if (!minEl || !maxEl) return false;
-  return parseInt(minEl.value, 10) !== d.min_warm_workers ||
-         parseInt(maxEl.value, 10) !== d.max_warm_workers;
+  if (parseInt(minEl.value, 10) !== d.min_warm_workers) return true;
+  if (parseInt(maxEl.value, 10) !== d.max_warm_workers) return true;
+  if (ttftEl && parseFloat(ttftEl.value) !== (d.ttft_threshold_ms || 0)) return true;
+  if (winEl && parseInt(winEl.value, 10) !== (d.ttft_window_seconds || 60)) return true;
+  return false;
 }
 
 async function refresh() {
@@ -157,8 +187,12 @@ async function refresh() {
             const key = css(dgdKey(d));
             const minEl = document.getElementById('dgd-min-' + key);
             const maxEl = document.getElementById('dgd-max-' + key);
+            const ttftEl = document.getElementById('dgd-ttft-' + key);
+            const winEl = document.getElementById('dgd-win-' + key);
             if (minEl) minEl.value = d.min_warm_workers;
             if (maxEl) maxEl.value = d.max_warm_workers;
+            if (ttftEl) ttftEl.value = d.ttft_threshold_ms || 0;
+            if (winEl) winEl.value = d.ttft_window_seconds || 60;
           }
         }
       } else {
@@ -230,11 +264,15 @@ async function saveDGD(name, namespace) {
   const key = css(namespace + '/' + name);
   const minInput = document.getElementById('dgd-min-' + key);
   const maxInput = document.getElementById('dgd-max-' + key);
+  const ttftInput = document.getElementById('dgd-ttft-' + key);
+  const winInput = document.getElementById('dgd-win-' + key);
   const btn = document.getElementById('dgd-btn-' + key);
   if (!minInput || !maxInput || !btn) return;
 
   const minVal = parseInt(minInput.value, 10) || 0;
   const maxVal = parseInt(maxInput.value, 10) || 0;
+  const ttftVal = ttftInput ? parseFloat(ttftInput.value) || 0 : 0;
+  const winVal = winInput ? parseInt(winInput.value, 10) || 60 : 60;
 
   btn.textContent = 'Saving...';
   btn.className = 'dgd-save saving';
@@ -243,7 +281,7 @@ async function saveDGD(name, namespace) {
     const res = await fetch('/dgds', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, namespace, min_warm_workers: minVal, max_warm_workers: maxVal }),
+      body: JSON.stringify({ name, namespace, min_warm_workers: minVal, max_warm_workers: maxVal, ttft_threshold_ms: ttftVal, ttft_window_seconds: winVal }),
     });
     if (!res.ok) {
       const err = await res.json();

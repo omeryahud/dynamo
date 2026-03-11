@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +30,7 @@ import (
 
 const swapGroupLabelKey = "run.ai/swap-group-instance-uuid"
 const dgdNameLabelKey = "nvidia.com/dynamo-graph-deployment-name"
+const frontendMetricsPort = 8000
 
 var dgdGVR = schema.GroupVersionResource{
 	Group:    "nvidia.com",
@@ -63,15 +65,28 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 			if unregErr := r.StateManager.UnregisterWorkerByPodName(req.Name); unregErr != nil {
 				logger.Info("Failed to unregister worker (may not exist)", "podName", req.Name, "error", unregErr)
 			}
+			// Also unregister as frontend if it was one
+			r.StateManager.UnregisterFrontend(req.Name)
 			return reconcile.Result{}, nil
 		}
 		logger.Error(err, "Failed to get Pod")
 		return reconcile.Result{}, err
 	}
 
+	// Check if this is a frontend pod (name contains "frontend")
+	if isFrontendPod(&pod) {
+		dgdName := pod.Labels[dgdNameLabelKey]
+		if dgdName != "" && pod.Status.PodIP != "" {
+			r.StateManager.RegisterFrontend(pod.Name, pod.Status.PodIP, frontendMetricsPort, dgdName, pod.Namespace)
+			logger.Info("Registered frontend pod for TTFT scraping",
+				"podName", pod.Name, "podIP", pod.Status.PodIP, "dgdName", dgdName)
+		}
+	}
+
 	swapGroupInstanceUUID, exists := pod.Labels[swapGroupLabelKey]
 	if !exists || swapGroupInstanceUUID == "" {
-		logger.Info("Pod missing swap-group-instance-uuid label, skipping", "podName", pod.Name)
+		// Not a swap-group worker pod — skip worker registration
+		// (might be a frontend-only pod, which was handled above)
 		return reconcile.Result{}, nil
 	}
 
@@ -123,6 +138,8 @@ func (r *PodReconciler) fetchAndStoreDGDConfig(ctx context.Context, dgdName, dgd
 	annotations := dgd.GetAnnotations()
 	minWarm := 0
 	maxWarm := 0
+	ttftThresholdMS := 0.0
+	ttftWindowSeconds := 60
 
 	if v, ok := annotations["swap-coordinator/min-warm-workers"]; ok {
 		if parsed, err := strconv.Atoi(v); err == nil {
@@ -134,9 +151,21 @@ func (r *PodReconciler) fetchAndStoreDGDConfig(ctx context.Context, dgdName, dgd
 			maxWarm = parsed
 		}
 	}
+	if v, ok := annotations["swap-coordinator/ttft-threshold-ms"]; ok {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			ttftThresholdMS = parsed
+		}
+	}
+	if v, ok := annotations["swap-coordinator/ttft-window-seconds"]; ok {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			ttftWindowSeconds = parsed
+		}
+	}
 
-	r.StateManager.SetDGDConfig(dgdName, dgdNamespace, minWarm, maxWarm)
-	logger.Info("Loaded DGD config", "dgdName", dgdName, "namespace", dgdNamespace, "minWarm", minWarm, "maxWarm", maxWarm)
+	r.StateManager.SetDGDConfig(dgdName, dgdNamespace, minWarm, maxWarm, ttftThresholdMS, ttftWindowSeconds)
+	logger.Info("Loaded DGD config", "dgdName", dgdName, "namespace", dgdNamespace,
+		"minWarm", minWarm, "maxWarm", maxWarm,
+		"ttftThresholdMS", ttftThresholdMS, "ttftWindowSeconds", ttftWindowSeconds)
 }
 
 // extractInstanceIDFromLogs fetches the pod's logs and parses the instance_id
@@ -192,15 +221,41 @@ func (r *PodReconciler) extractInstanceIDFromContainerLogs(ctx context.Context, 
 	return 0, fmt.Errorf("instance_id not found in container %s logs", containerName)
 }
 
+// isFrontendPod checks if a pod is a frontend pod based on naming convention
+// or the DYN_COMPONENT=frontend environment variable
+func isFrontendPod(pod *corev1.Pod) bool {
+	// Check naming convention first (e.g., qwen3-{N}-0-frontend-*)
+	if strings.Contains(pod.Name, "frontend") {
+		return true
+	}
+	// Check environment variable
+	for _, container := range pod.Spec.Containers {
+		for _, env := range container.Env {
+			if env.Name == "DYN_COMPONENT" && env.Value == "frontend" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SetupWithManager watches Pods that have the swap-group-instance-uuid label
+// or are frontend pods (for TTFT metrics scraping)
 func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	hasSwapGroupLabel := predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		v, ok := obj.GetLabels()[swapGroupLabelKey]
-		return ok && v != ""
+	isRelevantPod := predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		// Match swap-group worker pods
+		if v, ok := obj.GetLabels()[swapGroupLabelKey]; ok && v != "" {
+			return true
+		}
+		// Match frontend pods by DGD label (they need to have the DGD label to be useful)
+		if _, ok := obj.GetLabels()[dgdNameLabelKey]; ok {
+			return true
+		}
+		return false
 	})
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Pod{}).
-		WithEventFilter(hasSwapGroupLabel).
+		WithEventFilter(isRelevantPod).
 		Complete(r)
 }

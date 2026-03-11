@@ -5,6 +5,7 @@ package main
 
 import (
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -120,6 +121,10 @@ func main() {
 		}
 	}()
 	setupLog.Info("Started DGD watcher")
+
+	// Start the TTFT metrics scraper
+	go api.StartScraper(ctx, stateManager, 1*time.Second)
+	setupLog.Info("Started TTFT scraper")
 
 	// Start the controller manager
 	setupLog.Info("Starting controller manager")

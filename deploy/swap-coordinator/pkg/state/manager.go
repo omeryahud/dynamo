@@ -32,6 +32,18 @@ type Manager struct {
 	// workerLogits stores the last-known routing logit per worker instance
 	workerLogits map[uint64]float64
 
+	// ttftSamples stores rolling TTFT samples per DGD key ("namespace/name")
+	ttftSamples map[string][]TTFTSample
+
+	// frontendPods maps pod name to frontend pod info for metrics scraping
+	frontendPods map[string]*FrontendPod
+
+	// lastScrape stores the last scraped histogram values per frontend pod
+	lastScrape map[string]struct {
+		Sum   float64
+		Count uint64
+	}
+
 	// mu protects all maps from concurrent access
 	mu sync.RWMutex
 }
@@ -46,6 +58,12 @@ func NewManager() *Manager {
 		dgdConfigs:          make(map[string]*DGDConfig),
 		instanceToDGD:       make(map[uint64]string),
 		workerLogits:        make(map[uint64]float64),
+		ttftSamples:         make(map[string][]TTFTSample),
+		frontendPods:        make(map[string]*FrontendPod),
+		lastScrape: make(map[string]struct {
+			Sum   float64
+			Count uint64
+		}),
 	}
 }
 
@@ -264,16 +282,22 @@ func (m *Manager) GetWorkerMetadata(instanceID uint64) *WorkerMetadata {
 }
 
 // SetDGDConfig stores or updates the min/max warm worker configuration for a DGD
-func (m *Manager) SetDGDConfig(name, namespace string, minWarm, maxWarm int) {
+func (m *Manager) SetDGDConfig(name, namespace string, minWarm, maxWarm int, ttftThresholdMS float64, ttftWindowSeconds int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if ttftWindowSeconds <= 0 {
+		ttftWindowSeconds = 60
+	}
+
 	key := namespace + "/" + name
 	m.dgdConfigs[key] = &DGDConfig{
-		Name:           name,
-		Namespace:      namespace,
-		MinWarmWorkers: minWarm,
-		MaxWarmWorkers: maxWarm,
+		Name:              name,
+		Namespace:         namespace,
+		MinWarmWorkers:    minWarm,
+		MaxWarmWorkers:    maxWarm,
+		TTFTThresholdMS:   ttftThresholdMS,
+		TTFTWindowSeconds: ttftWindowSeconds,
 	}
 }
 
@@ -350,6 +374,166 @@ func (m *Manager) GetWorkerLogit(instanceID uint64) (float64, bool) {
 
 	logit, ok := m.workerLogits[instanceID]
 	return logit, ok
+}
+
+// RecordTTFTSample appends a TTFT sample for a DGD and prunes samples outside the window
+func (m *Manager) RecordTTFTSample(dgdKey string, avgTTFTMS float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sample := TTFTSample{
+		AvgTTFTMS: avgTTFTMS,
+		Timestamp: time.Now(),
+	}
+	m.ttftSamples[dgdKey] = append(m.ttftSamples[dgdKey], sample)
+
+	// Prune stale samples based on the DGD's window
+	m.pruneTTFTSamplesLocked(dgdKey)
+}
+
+// pruneTTFTSamplesLocked removes samples older than the DGD's window. Must hold mu.
+func (m *Manager) pruneTTFTSamplesLocked(dgdKey string) {
+	windowSeconds := 60 // default
+	if cfg, ok := m.dgdConfigs[dgdKey]; ok && cfg.TTFTWindowSeconds > 0 {
+		windowSeconds = cfg.TTFTWindowSeconds
+	}
+
+	cutoff := time.Now().Add(-time.Duration(windowSeconds) * time.Second)
+	samples := m.ttftSamples[dgdKey]
+	i := 0
+	for i < len(samples) && samples[i].Timestamp.Before(cutoff) {
+		i++
+	}
+	if i > 0 {
+		m.ttftSamples[dgdKey] = samples[i:]
+	}
+}
+
+// GetRollingAvgTTFT returns the rolling average TTFT in ms and sample count for a DGD
+func (m *Manager) GetRollingAvgTTFT(dgdKey string) (float64, int) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	samples := m.ttftSamples[dgdKey]
+	if len(samples) == 0 {
+		return 0, 0
+	}
+
+	// Filter to window
+	windowSeconds := 60
+	if cfg, ok := m.dgdConfigs[dgdKey]; ok && cfg.TTFTWindowSeconds > 0 {
+		windowSeconds = cfg.TTFTWindowSeconds
+	}
+	cutoff := time.Now().Add(-time.Duration(windowSeconds) * time.Second)
+
+	sum := 0.0
+	count := 0
+	for _, s := range samples {
+		if !s.Timestamp.Before(cutoff) {
+			sum += s.AvgTTFTMS
+			count++
+		}
+	}
+	if count == 0 {
+		return 0, 0
+	}
+	return sum / float64(count), count
+}
+
+// IsTTFTExceeded returns true if the DGD's rolling average TTFT exceeds its threshold
+func (m *Manager) IsTTFTExceeded(name, namespace string) bool {
+	key := namespace + "/" + name
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	cfg, ok := m.dgdConfigs[key]
+	if !ok || cfg.TTFTThresholdMS <= 0 {
+		return false
+	}
+
+	samples := m.ttftSamples[key]
+	if len(samples) == 0 {
+		return false
+	}
+
+	windowSeconds := cfg.TTFTWindowSeconds
+	if windowSeconds <= 0 {
+		windowSeconds = 60
+	}
+	cutoff := time.Now().Add(-time.Duration(windowSeconds) * time.Second)
+
+	sum := 0.0
+	count := 0
+	for _, s := range samples {
+		if !s.Timestamp.Before(cutoff) {
+			sum += s.AvgTTFTMS
+			count++
+		}
+	}
+	if count == 0 {
+		return false
+	}
+	return (sum / float64(count)) > cfg.TTFTThresholdMS
+}
+
+// RegisterFrontend registers a frontend pod for metrics scraping
+func (m *Manager) RegisterFrontend(podName, podIP string, port int, dgdName, namespace string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.frontendPods[podName] = &FrontendPod{
+		PodName:   podName,
+		PodIP:     podIP,
+		Port:      port,
+		DGDName:   dgdName,
+		Namespace: namespace,
+	}
+}
+
+// UnregisterFrontend removes a frontend pod from tracking
+func (m *Manager) UnregisterFrontend(podName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.frontendPods, podName)
+	delete(m.lastScrape, podName)
+}
+
+// ListFrontends returns a copy of all registered frontend pods
+func (m *Manager) ListFrontends() []*FrontendPod {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	pods := make([]*FrontendPod, 0, len(m.frontendPods))
+	for _, pod := range m.frontendPods {
+		p := *pod
+		pods = append(pods, &p)
+	}
+	return pods
+}
+
+// GetLastScrape returns the last scraped histogram values for a frontend pod
+func (m *Manager) GetLastScrape(podName string) (sum float64, count uint64, exists bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	v, ok := m.lastScrape[podName]
+	if !ok {
+		return 0, 0, false
+	}
+	return v.Sum, v.Count, true
+}
+
+// SetLastScrape stores the last scraped histogram values for a frontend pod
+func (m *Manager) SetLastScrape(podName string, sum float64, count uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.lastScrape[podName] = struct {
+		Sum   float64
+		Count uint64
+	}{Sum: sum, Count: count}
 }
 
 // GetWorkersInSwapGroup returns a list of instance IDs for all workers in a given swap group

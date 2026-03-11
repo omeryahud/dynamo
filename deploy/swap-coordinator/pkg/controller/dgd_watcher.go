@@ -61,6 +61,8 @@ func (w *DGDWatcher) handleDGD(obj interface{}) {
 
 	minWarm := 0
 	maxWarm := 0
+	ttftThresholdMS := 0.0
+	ttftWindowSeconds := 60
 	if v, exists := annotations["swap-coordinator/min-warm-workers"]; exists {
 		if parsed, err := strconv.Atoi(v); err == nil {
 			minWarm = parsed
@@ -71,9 +73,20 @@ func (w *DGDWatcher) handleDGD(obj interface{}) {
 			maxWarm = parsed
 		}
 	}
+	if v, exists := annotations["swap-coordinator/ttft-threshold-ms"]; exists {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			ttftThresholdMS = parsed
+		}
+	}
+	if v, exists := annotations["swap-coordinator/ttft-window-seconds"]; exists {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			ttftWindowSeconds = parsed
+		}
+	}
 
-	w.StateManager.SetDGDConfig(name, namespace, minWarm, maxWarm)
+	w.StateManager.SetDGDConfig(name, namespace, minWarm, maxWarm, ttftThresholdMS, ttftWindowSeconds)
 	dgdWatcherLog.Info("Updated DGD config from watch event",
 		"dgdName", name, "namespace", namespace,
-		"minWarm", minWarm, "maxWarm", maxWarm)
+		"minWarm", minWarm, "maxWarm", maxWarm,
+		"ttftThresholdMS", ttftThresholdMS, "ttftWindowSeconds", ttftWindowSeconds)
 }
