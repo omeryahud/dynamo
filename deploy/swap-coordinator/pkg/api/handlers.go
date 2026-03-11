@@ -118,12 +118,19 @@ func DGDsHandler(stateManager *state.Manager) gin.HandlerFunc {
 
 		dgds := make([]StateDGD, 0, len(configs))
 		for _, cfg := range configs {
+			dgdKey := cfg.Namespace + "/" + cfg.Name
+			avgTTFT, sampleCount := stateManager.GetRollingAvgTTFT(dgdKey)
 			dgds = append(dgds, StateDGD{
-				Name:           cfg.Name,
-				Namespace:      cfg.Namespace,
-				MinWarmWorkers: cfg.MinWarmWorkers,
-				MaxWarmWorkers: cfg.MaxWarmWorkers,
-				CurrentWarm:    stateManager.CountWarmWorkersForDGD(cfg.Name, cfg.Namespace),
+				Name:              cfg.Name,
+				Namespace:         cfg.Namespace,
+				MinWarmWorkers:    cfg.MinWarmWorkers,
+				MaxWarmWorkers:    cfg.MaxWarmWorkers,
+				CurrentWarm:       stateManager.CountWarmWorkersForDGD(cfg.Name, cfg.Namespace),
+				TTFTThresholdMS:   cfg.TTFTThresholdMS,
+				TTFTWindowSeconds: cfg.TTFTWindowSeconds,
+				AvgTTFTMS:         avgTTFT,
+				TTFTSampleCount:   sampleCount,
+				TTFTExceeded:      stateManager.IsTTFTExceeded(cfg.Name, cfg.Namespace),
 			})
 		}
 
@@ -165,12 +172,21 @@ func UpdateDGDHandler(stateManager *state.Manager, dynamicClient dynamic.Interfa
 		}
 
 		// Patch the DGD annotations in Kubernetes
+		annotations := map[string]string{
+			"swap-coordinator/min-warm-workers": strconv.Itoa(request.MinWarmWorkers),
+			"swap-coordinator/max-warm-workers": strconv.Itoa(request.MaxWarmWorkers),
+		}
+		if request.TTFTThresholdMS > 0 {
+			annotations["swap-coordinator/ttft-threshold-ms"] = fmt.Sprintf("%.1f", request.TTFTThresholdMS)
+		} else {
+			annotations["swap-coordinator/ttft-threshold-ms"] = "0"
+		}
+		if request.TTFTWindowSeconds > 0 {
+			annotations["swap-coordinator/ttft-window-seconds"] = strconv.Itoa(request.TTFTWindowSeconds)
+		}
 		patch := map[string]interface{}{
 			"metadata": map[string]interface{}{
-				"annotations": map[string]string{
-					"swap-coordinator/min-warm-workers": strconv.Itoa(request.MinWarmWorkers),
-					"swap-coordinator/max-warm-workers": strconv.Itoa(request.MaxWarmWorkers),
-				},
+				"annotations": annotations,
 			},
 		}
 		patchBytes, err := json.Marshal(patch)
@@ -196,13 +212,15 @@ func UpdateDGDHandler(stateManager *state.Manager, dynamicClient dynamic.Interfa
 		}
 
 		// Also update in-memory state immediately
-		stateManager.SetDGDConfig(request.Name, request.Namespace, request.MinWarmWorkers, request.MaxWarmWorkers)
+		stateManager.SetDGDConfig(request.Name, request.Namespace, request.MinWarmWorkers, request.MaxWarmWorkers, request.TTFTThresholdMS, request.TTFTWindowSeconds)
 
 		handlerLog.Info("Updated DGD config",
 			"dgdName", request.Name,
 			"namespace", request.Namespace,
 			"minWarm", request.MinWarmWorkers,
-			"maxWarm", request.MaxWarmWorkers)
+			"maxWarm", request.MaxWarmWorkers,
+			"ttftThresholdMS", request.TTFTThresholdMS,
+			"ttftWindowSeconds", request.TTFTWindowSeconds)
 
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
@@ -278,6 +296,13 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 		reason := "no-warm-match"
 		belowMin := minWarm > 0 && warmCount < minWarm
 
+		// Check if TTFT threshold is exceeded and we should warm more workers
+		ttftWantsMoreWarm := false
+		if dgdConfig != nil && !belowMin && warmCount < maxWarm {
+			ttftWantsMoreWarm = stateManager.IsTTFTExceeded(dgdName, dgdNamespace)
+		}
+		needMoreWarm := belowMin || ttftWantsMoreWarm
+
 		if zeroMax {
 			// max=0 means this DGD is not allowed to run. Reject the request.
 			logger.Info("DGD max_warm_workers=0, rejecting request",
@@ -286,7 +311,7 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 				Error: fmt.Sprintf("DGD %s/%s has max_warm_workers=0, no workers allowed", dgdNamespace, dgdName),
 			})
 			return
-		} else if !belowMin {
+		} else if !needMoreWarm {
 			for i := range request.Workers {
 				candidate := &request.Workers[i]
 				swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
@@ -308,8 +333,13 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 				}
 			}
 		} else {
-			logger.Info("Below min-warm, skipping Tier 1 to warm additional workers",
-				"dgdName", dgdName, "warmCount", warmCount, "minWarm", minWarm)
+			skipReason := "below-min"
+			if ttftWantsMoreWarm {
+				skipReason = "ttft-exceeded"
+			}
+			logger.Info("Skipping Tier 1 to warm additional workers",
+				"dgdName", dgdName, "warmCount", warmCount, "minWarm", minWarm,
+				"reason", skipReason)
 		}
 
 		// canEvict checks whether evicting the warm instance from a swap group
@@ -370,9 +400,9 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 					}
 				}
 			} else {
-				// Pass 1: prefer truly cold swap groups, or same-model groups when not below min.
-				// When below min, same-model reuse doesn't increase warm count, so skip it —
-				// we need to pick a swap group where we'd actually create a NEW warm instance.
+				// Pass 1: prefer truly cold swap groups, or same-model groups when not needing more warm.
+				// When we need more warm workers, same-model reuse doesn't increase warm count,
+				// so skip it — we need to pick a swap group where we'd actually create a NEW warm instance.
 				for i := range request.Workers {
 					candidate := &request.Workers[i]
 					swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
@@ -388,9 +418,12 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 						selected = candidate
 						selectedSwapGroupUUID = swapGroupUUID
 						reason = "cold-swap-group"
+						if ttftWantsMoreWarm {
+							reason = "cold-swap-group-ttft"
+						}
 						break
 					}
-					if !belowMin && candidateSet[swapGroupState.WarmInstanceID] {
+					if !needMoreWarm && candidateSet[swapGroupState.WarmInstanceID] {
 						// Same model already warm — reuse only if not trying to grow warm count
 						selected = candidate
 						selectedSwapGroupUUID = swapGroupUUID
@@ -422,10 +455,10 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 
 			// Tier 3: Last resort — no safe eviction possible, must evict anyway
 			if selected == nil {
-				// If we were below min but couldn't find a safe eviction,
+				// If we needed more warm workers but couldn't find a safe eviction,
 				// fall back to Tier 1 (use existing warm worker) rather than
 				// violating another DGD's min.
-				if belowMin {
+				if needMoreWarm {
 					for i := range request.Workers {
 						candidate := &request.Workers[i]
 						swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)

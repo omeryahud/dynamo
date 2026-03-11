@@ -45,11 +45,16 @@ type StateWorker struct {
 
 // StateDGD represents a DGD in the state snapshot
 type StateDGD struct {
-	Name           string `json:"name"`
-	Namespace      string `json:"namespace"`
-	MinWarmWorkers int    `json:"min_warm_workers"`
-	MaxWarmWorkers int    `json:"max_warm_workers"`
-	CurrentWarm    int    `json:"current_warm"`
+	Name              string  `json:"name"`
+	Namespace         string  `json:"namespace"`
+	MinWarmWorkers    int     `json:"min_warm_workers"`
+	MaxWarmWorkers    int     `json:"max_warm_workers"`
+	CurrentWarm       int     `json:"current_warm"`
+	TTFTThresholdMS   float64 `json:"ttft_threshold_ms"`
+	TTFTWindowSeconds int     `json:"ttft_window_seconds"`
+	AvgTTFTMS         float64 `json:"avg_ttft_ms"`
+	TTFTSampleCount   int     `json:"ttft_sample_count"`
+	TTFTExceeded      bool    `json:"ttft_exceeded"`
 }
 
 // StateSwapGroup represents a swap group in the state snapshot
@@ -67,10 +72,12 @@ type SetWarmRequest struct {
 
 // UpdateDGDRequest contains the DGD name/namespace and new min/max warm worker values
 type UpdateDGDRequest struct {
-	Name           string `json:"name" binding:"required"`
-	Namespace      string `json:"namespace" binding:"required"`
-	MinWarmWorkers int    `json:"min_warm_workers"`
-	MaxWarmWorkers int    `json:"max_warm_workers"`
+	Name              string  `json:"name" binding:"required"`
+	Namespace         string  `json:"namespace" binding:"required"`
+	MinWarmWorkers    int     `json:"min_warm_workers"`
+	MaxWarmWorkers    int     `json:"max_warm_workers"`
+	TTFTThresholdMS   float64 `json:"ttft_threshold_ms"`
+	TTFTWindowSeconds int     `json:"ttft_window_seconds"`
 }
 
 // ErrorResponse contains error information for failed requests
