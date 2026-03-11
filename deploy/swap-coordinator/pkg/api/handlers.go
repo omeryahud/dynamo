@@ -47,7 +47,7 @@ func StateHandler(stateManager *state.Manager) gin.HandlerFunc {
 			})
 		}
 
-		c.JSON(http.StatusOK, groups)
+		c.IndentedJSON(http.StatusOK, groups)
 	}
 }
 

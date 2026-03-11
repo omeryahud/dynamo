@@ -24,7 +24,7 @@ ensure_port_forward() {
 
 URL="http://localhost:$LOCAL_PORT/v1/chat/completions"
 i=0
-FOLLOWUPS=5
+FOLLOWUPS=20
 
 rand_str() { head -c "$1" /dev/urandom | base64 | tr -dc 'a-zA-Z0-9 ' | head -c "$1"; }
 
