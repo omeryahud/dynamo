@@ -343,7 +343,8 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 		}
 
 		// canEvict checks whether evicting the warm instance from a swap group
-		// is safe — i.e., it won't drop the victim's DGD below its min-warm.
+		// is safe — i.e., it won't drop the victim's DGD below its min-warm
+		// and the victim isn't already under TTFT pressure.
 		// Returns true if the swap group is cold, the warm instance is one of
 		// our own candidates, or the victim's DGD can afford to lose a warm worker.
 		canEvict := func(swapGroupState *state.SwapGroupInstanceState) bool {
@@ -357,12 +358,20 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 			if victimDGDName == dgdName && victimDGDNS == dgdNamespace {
 				return true // same DGD, not losing a warm worker
 			}
+			// Check victim's min-warm constraint
 			victimConfig := stateManager.GetDGDConfig(victimDGDName, victimDGDNS)
-			if victimConfig == nil || victimConfig.MinWarmWorkers <= 0 {
-				return true // no min constraint
-			}
 			victimWarmCount := stateManager.CountWarmWorkersForDGD(victimDGDName, victimDGDNS)
-			return victimWarmCount > victimConfig.MinWarmWorkers
+
+			if victimConfig != nil && victimConfig.MinWarmWorkers > 0 && victimWarmCount <= victimConfig.MinWarmWorkers {
+				return false // would violate victim's min-warm
+			}
+
+			// Don't evict from a DGD that's already under TTFT pressure
+			if stateManager.IsTTFTExceeded(victimDGDName, victimDGDNS) {
+				return false
+			}
+
+			return true
 		}
 
 		// Tier 2: Fall back — prefer cold swap groups, with max-warm enforcement
@@ -474,17 +483,22 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 						}
 					}
 				}
-				// Absolute last resort
+				// Absolute last resort — try to reuse a swap group that already
+				// has one of our own workers warm (avoids evicting a victim under pressure).
 				if selected == nil {
-					selected = &request.Workers[0]
-					swapGroupUUID, err := stateManager.GetSwapGroupInstance(selected.InstanceID)
-					if err == nil {
-						selectedSwapGroupUUID = swapGroupUUID
-					}
-					if maxReached {
-						reason = "max-warm-reached"
-					} else {
-						reason = "forced-swap"
+					for i := range request.Workers {
+						candidate := &request.Workers[i]
+						swapGroupUUID, err := stateManager.GetSwapGroupInstance(candidate.InstanceID)
+						if err != nil {
+							continue
+						}
+						swapGroupState := stateManager.GetSwapGroupState(swapGroupUUID)
+						if swapGroupState != nil && swapGroupState.WarmInstanceID == candidate.InstanceID {
+							selected = candidate
+							selectedSwapGroupUUID = swapGroupUUID
+							reason = "reuse-own-warm"
+							break
+						}
 					}
 				}
 			}
@@ -498,6 +512,19 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 				"warmCount", warmCount,
 				"minWarm", minWarm,
 				"maxWarm", maxWarm)
+		}
+
+		if selected == nil {
+			logger.Info("No worker selected, all eviction targets are protected",
+				"dgdName", dgdName,
+				"warmCount", warmCount,
+				"minWarm", minWarm,
+				"maxWarm", maxWarm)
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "no safe worker available",
+				"dgdName": dgdName,
+			})
+			return
 		}
 
 		// Update the warm instance for the selected worker's swap group

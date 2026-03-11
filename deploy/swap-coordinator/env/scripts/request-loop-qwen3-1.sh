@@ -37,7 +37,7 @@ while true; do
       prompt="${prompt} $(rand_str 50)"
     fi
     i=$((i + 1))
-    echo -n "[qwen3-1] Request #$i (turn $turn, ${#prompt} chars): "
+    echo -n "[qwen3-1] req #$turn (${#prompt} chars): "
     curl -s --max-time 30 "$URL" \
       -H 'Content-Type: application/json' \
       -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":10}" \
