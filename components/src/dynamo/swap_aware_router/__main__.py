@@ -103,7 +103,7 @@ class StandaloneRouterHandler:
             await self._http_session.close()
             self._http_session = None
 
-    async def _call_swap_coordinator(self, workers: list, request_id: str) -> Optional[dict]:
+    async def _call_swap_coordinator(self, workers: list, request_id: str) -> dict:
         """
         Call SwapCoordinator service to select the best worker.
 
@@ -112,70 +112,53 @@ class StandaloneRouterHandler:
             request_id: Unique request ID for tracking
 
         Returns:
-            Selected worker info dict or None if call fails
+            Selected worker info dict
+
+        Raises:
+            SwapCoordinatorRejectedError: If the coordinator rejects the request (403, 503)
+            RuntimeError: If the coordinator is unreachable or returns an error
         """
         if not self.swap_coordinator_url or not self._http_session:
-            return None
+            raise RuntimeError("SwapCoordinator URL not configured")
 
-        try:
-            # Build request payload matching SwapCoordinator API contract
-            # Extract instance_id from worker metadata (if available)
-            # ranked_workers already contains logit from Rust-side rank_workers()
-            # and is sorted best-first; pass through directly with instance_id mapping
-            worker_candidates = []
-            for worker in workers:
-                candidate = {
-                    "instance_id": worker["worker_id"],
-                    "dp_rank": worker["dp_rank"],
-                    "potential_prefill_tokens": worker["potential_prefill_tokens"],
-                    "potential_decode_blocks": worker["potential_decode_blocks"],
-                    "logit": worker["logit"],
-                }
-                worker_candidates.append(candidate)
-
-            payload = {
-                "workers": worker_candidates,
-                "request_id": request_id,
+        # Build request payload matching SwapCoordinator API contract
+        worker_candidates = []
+        for worker in workers:
+            candidate = {
+                "instance_id": worker["worker_id"],
+                "dp_rank": worker["dp_rank"],
+                "potential_prefill_tokens": worker["potential_prefill_tokens"],
+                "potential_decode_blocks": worker["potential_decode_blocks"],
+                "logit": worker["logit"],
             }
+            worker_candidates.append(candidate)
 
-            # Call SwapCoordinator /select_worker endpoint
-            url = f"{self.swap_coordinator_url}/select_worker"
-            async with self._http_session.post(url, json=payload) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    logger.debug(
-                        f"SwapCoordinator selected: instance_id={result['selected_instance_id']}, "
-                        f"dp_rank={result['selected_dp_rank']}, reason={result['reason']}"
-                    )
-                    return result
-                elif response.status == 403:
-                    error_text = await response.text()
-                    logger.warning(
-                        f"SwapCoordinator rejected request (403): {error_text}"
-                    )
-                    raise SwapCoordinatorRejectedError(error_text)
-                elif response.status == 501:
-                    # Phase 1 stub - selection not implemented yet
-                    logger.debug(
-                        "SwapCoordinator returned 501 (Phase 1 - selection not implemented). "
-                        "Falling back to local selection."
-                    )
-                    return None
-                else:
-                    error_text = await response.text()
-                    logger.warning(
-                        f"SwapCoordinator returned status {response.status}: {error_text}"
-                    )
-                    return None
+        payload = {
+            "workers": worker_candidates,
+            "request_id": request_id,
+        }
 
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"SwapCoordinator request timed out after {self.swap_coordinator_timeout}s"
-            )
-            return None
-        except Exception as e:
-            logger.warning(f"Failed to call SwapCoordinator: {e}")
-            return None
+        # Call SwapCoordinator /select_worker endpoint
+        url = f"{self.swap_coordinator_url}/select_worker"
+        async with self._http_session.post(url, json=payload) as response:
+            if response.status == 200:
+                result = await response.json()
+                logger.debug(
+                    f"SwapCoordinator selected: instance_id={result['selected_instance_id']}, "
+                    f"dp_rank={result['selected_dp_rank']}, reason={result['reason']}"
+                )
+                return result
+            elif response.status in (403, 503):
+                error_text = await response.text()
+                logger.warning(
+                    f"SwapCoordinator rejected request ({response.status}): {error_text}"
+                )
+                raise SwapCoordinatorRejectedError(error_text)
+            else:
+                error_text = await response.text()
+                raise RuntimeError(
+                    f"SwapCoordinator returned status {response.status}: {error_text}"
+                )
 
     async def generate(self, request):
         """
@@ -209,45 +192,31 @@ class StandaloneRouterHandler:
                 ranked_workers = await self.kv_push_router.rank_workers(token_ids)
 
                 if not ranked_workers:
-                    logger.warning(
-                        "Swap-aware routing enabled but no workers available. "
-                        "Falling back to default routing."
+                    raise RuntimeError(
+                        "Swap-aware routing enabled but no workers available"
                     )
                 else:
+                    request_id = request.get("request_id", f"req-{id(request)}")
+                    coordinator_result = await self._call_swap_coordinator(
+                        ranked_workers, request_id
+                    )
+
+                    selected_instance_id = coordinator_result["selected_instance_id"]
+                    selected_dp_rank = coordinator_result["selected_dp_rank"]
+
+                    # Find the matching worker in ranked_workers
                     best_worker = None
-                    selection_source = "local"
+                    for worker in ranked_workers:
+                        if (worker["worker_id"] == selected_instance_id and
+                            worker["dp_rank"] == selected_dp_rank):
+                            best_worker = worker
+                            break
 
-                    # Try SwapCoordinator if configured
-                    if self.swap_coordinator_url:
-                        request_id = request.get("request_id", f"req-{id(request)}")
-                        coordinator_result = await self._call_swap_coordinator(
-                            ranked_workers, request_id
-                        )
-
-                        if coordinator_result:
-                            # SwapCoordinator made a selection
-                            selected_instance_id = coordinator_result["selected_instance_id"]
-                            selected_dp_rank = coordinator_result["selected_dp_rank"]
-
-                            # Find the matching worker in ranked_workers
-                            for worker in ranked_workers:
-                                if (worker["worker_id"] == selected_instance_id and
-                                    worker["dp_rank"] == selected_dp_rank):
-                                    best_worker = worker
-                                    selection_source = "swap-coordinator"
-                                    break
-
-                            if not best_worker:
-                                logger.warning(
-                                    f"SwapCoordinator selected instance_id={selected_instance_id} "
-                                    f"dp_rank={selected_dp_rank}, but worker not found in "
-                                    f"ranked_workers. Falling back to local selection."
-                                )
-
-                    # Fall back to local selection: rank_workers() already placed the best worker first
                     if not best_worker:
-                        best_worker = ranked_workers[0]
-                        selection_source = "local"
+                        raise RuntimeError(
+                            f"SwapCoordinator selected instance_id={selected_instance_id} "
+                            f"dp_rank={selected_dp_rank}, but worker not found in ranked_workers"
+                        )
 
                     routing = {
                         "backend_instance_id": best_worker['worker_id'],
@@ -255,21 +224,14 @@ class StandaloneRouterHandler:
                     }
 
                     logger.info(
-                        f"Swap-aware routing ({selection_source}): Selected worker "
+                        f"Swap-aware routing: Selected worker "
                         f"{best_worker['worker_id']} (dp_rank={best_worker['dp_rank']}) with "
                         f"{best_worker['potential_prefill_tokens']} prefill tokens, "
                         f"{best_worker['potential_decode_blocks']} decode blocks"
                     )
 
-            except SwapCoordinatorRejectedError:
+            except (SwapCoordinatorRejectedError, RuntimeError):
                 raise
-            except Exception as e:
-                logger.error(
-                    f"Failed to apply swap-aware routing: {e}. "
-                    f"Falling back to default routing."
-                )
-                # Continue with routing=None to use default behavior
-                routing = None
 
         preprocessed_request = {
             "model": request.get("model", "unknown"),
@@ -426,8 +388,8 @@ def parse_args():
         default=None,
         help=(
             "SwapCoordinator service URL for swap-aware routing decisions "
-            "(e.g., http://swap-coordinator-service:8080). If not specified, "
-            "uses local KV-cache based selection. Only used when --swap-aware-routing is enabled."
+            "(e.g., http://swap-coordinator-service:8080). "
+            "Required when --swap-aware-routing is enabled."
         ),
     )
 
@@ -531,9 +493,8 @@ async def worker(runtime: DistributedRuntime):
     )
     await handler.initialize()
 
-    # Expose endpoints — get the generate endpoint then derive the component from it
+    # Expose endpoints
     generate_endpoint = runtime.endpoint(f"{namespace}.router.generate")
-    component = generate_endpoint.component()
 
     if args.register_model:
         if not args.model_name:
