@@ -3,33 +3,13 @@
 # Each conversation: random 100-char initial prompt, then 5 follow-ups appending 50 chars each.
 set -euo pipefail
 
-LOCAL_PORT=8002
 MODEL="Qwen/Qwen3-0.6B"
-SVC="svc/qwen3-3-frontend"
-NS="swap"
-PF_PID=""
-
-cleanup() { kill $PF_PID 2>/dev/null; }
-trap cleanup EXIT
-
-ensure_port_forward() {
-  if [ -n "$PF_PID" ] && kill -0 "$PF_PID" 2>/dev/null; then
-    return
-  fi
-  echo "[qwen3-3] Starting port-forward $SVC -> localhost:$LOCAL_PORT..."
-  kubectl port-forward -n "$NS" "$SVC" "$LOCAL_PORT":8000 &>/dev/null &
-  PF_PID=$!
-  sleep 2
-}
-
-URL="http://localhost:$LOCAL_PORT/v1/chat/completions"
-i=0
+URL="http://ec2-3-238-76-242.compute-1.amazonaws.com:30703/v1/chat/completions"
 FOLLOWUPS=20
 
 rand_str() { head -c "$1" /dev/urandom | base64 | tr -dc 'a-zA-Z0-9 ' | head -c "$1"; }
 
 while true; do
-  ensure_port_forward
   prompt="$(rand_str 100)"
 
   for turn in $(seq 0 "$FOLLOWUPS"); do
