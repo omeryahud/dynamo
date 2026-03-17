@@ -366,7 +366,15 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 			victimConfig := stateManager.GetDGDConfig(victimDGDName, victimDGDNS)
 			victimWarmCount := stateManager.CountWarmWorkersForDGD(victimDGDName, victimDGDNS)
 
-			if victimConfig != nil && victimConfig.MinWarmWorkers > 0 && victimWarmCount <= victimConfig.MinWarmWorkers {
+			if victimConfig != nil && victimWarmCount > victimConfig.MaxWarmWorkers {
+				return true // victim is over subscribed, safe to evict
+			}
+
+			if victimConfig != nil && victimWarmCount > 0 && victimConfig.MinWarmWorkers <= 0 {
+				return true // victim is over subscribed, safe to evict
+			}
+
+			if victimConfig != nil && victimWarmCount <= victimConfig.MinWarmWorkers && victimConfig.MinWarmWorkers > 0 {
 				return false // would violate victim's min-warm
 			}
 
