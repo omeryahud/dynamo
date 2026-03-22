@@ -25,8 +25,8 @@ spec:
           value: round-robin
       extraPodSpec:
         mainContainer:
-          image: dynamo:latest-vllm-runtime
-          imagePullPolicy: Never
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          imagePullPolicy: IfNotPresent
           name: ""
           resources: {}
           securityContext:
@@ -51,8 +51,8 @@ spec:
           runai/queue: swap
       extraPodSpec:
         mainContainer:
-          image: dynamo:latest-vllm-runtime
-          imagePullPolicy: Never
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          imagePullPolicy: IfNotPresent
           name: ""
           env:
           - name: DYN_LOG
@@ -96,8 +96,11 @@ spec:
       envFromSecret: hf-token-secret
       replicas: 4
       extraPodMetadata:
+        labels:
+          runai/queue: swap
         annotations:
           gpu-fraction: "0.3"
+          gpu-fraction-num-devices: "3"
       extraPodSpec:
         mainContainer:
           env:
@@ -107,8 +110,8 @@ spec:
             value: "1.0"
           - name: RUNAI_SWAP_MAX_BLOCK_SIZE_MB
             value: "512"
-          image: dynamo:latest-vllm-runtime
-          imagePullPolicy: Never
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          imagePullPolicy: IfNotPresent
           name: ""
           workingDir: /workspace/
           command:

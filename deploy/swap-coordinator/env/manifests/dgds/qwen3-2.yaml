@@ -96,8 +96,11 @@ spec:
       envFromSecret: hf-token-secret
       replicas: 4
       extraPodMetadata:
+        labels:
+          runai/queue: swap
         annotations:
           gpu-fraction: "0.3"
+          gpu-fraction-num-devices: "3"
       extraPodSpec:
         mainContainer:
           env:

@@ -6,12 +6,6 @@ This feature introduces **GPU swap-aware routing** to Dynamo's KV-cache router. 
 
 The solution is a two-component architecture with a centralized SwapCoordinator making global swap decisions.
 
-## Branch Info
-
-- **Branch:** `omeryahud/swap-aware-router`
-- **Commits:** 23 (from `a1e7bcb95` to `09c8600d6`)
-- **Scope:** ~65,866 lines added across 246 files
-
 ## Architecture
 
 ```
