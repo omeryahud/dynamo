@@ -98,7 +98,8 @@ spec:
       extraPodMetadata:
         labels:
           runai/queue: swap
-        annotations:
+          model: qwen3-3
+        annotations:  
           gpu-fraction: "0.3"
           gpu-fraction-num-devices: "3"
       extraPodSpec:
@@ -139,7 +140,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  nvidia.com/selector: qwen3-3-vllmworker
+                  model: qwen3-3
               topologyKey: kubernetes.io/hostname
         schedulerName: runai-scheduler
         securityContext:
