@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
 	"github.com/gin-gonic/gin"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -143,8 +144,8 @@ func DGDsHandler(stateManager *state.Manager) gin.HandlerFunc {
 }
 
 var dgdGVR = schema.GroupVersionResource{
-	Group:    "nvidia.com",
-	Version:  "v1alpha1",
+	Group:    dynamov1alpha1.GroupVersion.Group,
+	Version:  dynamov1alpha1.GroupVersion.Version,
 	Resource: "dynamographdeployments",
 }
 

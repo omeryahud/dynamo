@@ -4,10 +4,9 @@
 package controller
 
 import (
-	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,43 +15,27 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	dynamov1 "github.com/ai-dynamo/dynamo/swap-coordinator/api/v1"
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 )
 
 const swapGroupLabelKey = "run.ai/swap-group-instance-uuid"
 const dgdNameLabelKey = "nvidia.com/dynamo-graph-deployment-name"
 const frontendMetricsPort = 8000
 
-var dgdGVR = schema.GroupVersionResource{
-	Group:    "nvidia.com",
-	Version:  "v1alpha1",
-	Resource: "dynamographdeployments",
-}
-
-// instanceIDPattern matches instance_id in worker logs.
-// Covers both structured tracing fields (instance_id=N) and
-// JSON log format ("instance_id":N).
-var instanceIDPattern = regexp.MustCompile(`instance_id[=:][\s"]*(\d+)`)
-
-// ansiEscape strips ANSI escape sequences from log output.
-var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-
 // PodReconciler reconciles Pods that carry the swap-group-instance-uuid label
 type PodReconciler struct {
 	client.Client
-	Scheme        *runtime.Scheme
-	Clientset     kubernetes.Interface
-	DynamicClient dynamic.Interface
-	StateManager  *state.Manager
+	Scheme       *runtime.Scheme
+	StateManager *state.Manager
 }
 
 func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -74,6 +57,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 	}
 
 	// Check if this is a frontend pod (name contains "frontend")
+	// TODO: migrate to ownership chain approach (PodClique roleName or component labels)
 	if isFrontendPod(&pod) {
 		dgdName := pod.Labels[dgdNameLabelKey]
 		if dgdName != "" && pod.Status.PodIP != "" {
@@ -90,18 +74,17 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 		return reconcile.Result{}, nil
 	}
 
-	// Extract the real instance_id from the worker's logs
-	instanceID, err := r.extractInstanceIDFromLogs(ctx, &pod)
+	// Extract instance_id from the DynamoWorkerMetadata CRD
+	instanceID, err := r.extractInstanceIDFromDWM(ctx, pod.Namespace, pod.Name)
 	if err != nil {
-		logger.Info("Could not extract instance_id from pod logs, will retry",
+		logger.Info("Could not extract instance_id from DynamoWorkerMetadata, will retry",
 			"podName", pod.Name, "error", err)
 		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	// Read DGD name from pod label and fetch DGD annotations
-	dgdName := pod.Labels[dgdNameLabelKey]
-	dgdNamespace := pod.Namespace
-	if dgdName != "" && r.DynamicClient != nil {
+	// Resolve DGD via ownership chain: Pod → PodClique → PodCliqueSet → DGD
+	dgdName, dgdNamespace := r.resolveDGDFromOwnerChain(ctx, &pod)
+	if dgdName != "" {
 		r.fetchAndStoreDGDConfig(ctx, dgdName, dgdNamespace)
 	}
 
@@ -124,13 +107,97 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 	return reconcile.Result{}, nil
 }
 
-// fetchAndStoreDGDConfig fetches the DGD resource via dynamic client and stores
-// the min/max warm worker annotations in the state manager
+// extractInstanceIDFromDWM fetches the DynamoWorkerMetadata CRD for the given pod
+// and extracts the instance_id from its spec.data JSON blob.
+// The CRD name matches the pod name by convention.
+func (r *PodReconciler) extractInstanceIDFromDWM(ctx context.Context, namespace, podName string) (uint64, error) {
+	var dwm dynamov1.DynamoWorkerMetadata
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: podName}, &dwm); err != nil {
+		return 0, err
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(dwm.Spec.Data.Raw, &data); err != nil {
+		return 0, fmt.Errorf("failed to parse DWM data: %w", err)
+	}
+
+	// Extract instance_id from the first endpoint entry.
+	// All endpoints for a single worker share the same instance_id.
+	endpoints, ok := data["endpoints"].(map[string]interface{})
+	if !ok || len(endpoints) == 0 {
+		return 0, fmt.Errorf("no endpoints in DWM data")
+	}
+	for _, v := range endpoints {
+		ep, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if id, ok := ep["instance_id"].(float64); ok {
+			return uint64(id), nil
+		}
+	}
+	return 0, fmt.Errorf("instance_id not found in DWM endpoints")
+}
+
+// resolveDGDFromOwnerChain traverses the Kubernetes ownership chain from a Pod
+// up to the DynamoGraphDeployment: Pod → PodClique → PodCliqueSet → DGD.
+// Returns the DGD name and namespace, or empty strings if the chain cannot be resolved.
+func (r *PodReconciler) resolveDGDFromOwnerChain(ctx context.Context, pod *corev1.Pod) (string, string) {
+	logger := log.FromContext(ctx)
+
+	// Step 1: Pod → PodClique
+	pcOwner := findOwnerRef(pod.OwnerReferences, "PodClique")
+	if pcOwner == nil {
+		logger.V(1).Info("Pod has no PodClique owner", "podName", pod.Name)
+		return "", ""
+	}
+
+	var pc grovev1alpha1.PodClique
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: pcOwner.Name}, &pc); err != nil {
+		logger.V(1).Info("Failed to get PodClique", "name", pcOwner.Name, "error", err)
+		return "", ""
+	}
+
+	// Step 2: PodClique → PodCliqueSet
+	pcsOwner := findOwnerRef(pc.OwnerReferences, "PodCliqueSet")
+	if pcsOwner == nil {
+		logger.V(1).Info("PodClique has no PodCliqueSet owner", "podClique", pcOwner.Name)
+		return "", ""
+	}
+
+	var pcs grovev1alpha1.PodCliqueSet
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: pcsOwner.Name}, &pcs); err != nil {
+		logger.V(1).Info("Failed to get PodCliqueSet", "name", pcsOwner.Name, "error", err)
+		return "", ""
+	}
+
+	// Step 3: PodCliqueSet → DynamoGraphDeployment
+	dgdOwner := findOwnerRef(pcs.OwnerReferences, "DynamoGraphDeployment")
+	if dgdOwner == nil {
+		logger.V(1).Info("PodCliqueSet has no DynamoGraphDeployment owner", "podCliqueSet", pcsOwner.Name)
+		return "", ""
+	}
+
+	return dgdOwner.Name, pod.Namespace
+}
+
+// findOwnerRef finds an owner reference of the given kind in the list.
+func findOwnerRef(refs []metav1.OwnerReference, kind string) *metav1.OwnerReference {
+	for i := range refs {
+		if refs[i].Kind == kind {
+			return &refs[i]
+		}
+	}
+	return nil
+}
+
+// fetchAndStoreDGDConfig fetches the DynamoGraphDeployment resource and stores
+// the swap-coordinator annotations in the state manager.
 func (r *PodReconciler) fetchAndStoreDGDConfig(ctx context.Context, dgdName, dgdNamespace string) {
 	logger := log.FromContext(ctx)
 
-	dgd, err := r.DynamicClient.Resource(dgdGVR).Namespace(dgdNamespace).Get(ctx, dgdName, metav1.GetOptions{})
-	if err != nil {
+	var dgd dynamov1alpha1.DynamoGraphDeployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: dgdNamespace, Name: dgdName}, &dgd); err != nil {
 		logger.Info("Failed to fetch DGD resource", "dgdName", dgdName, "namespace", dgdNamespace, "error", err)
 		return
 	}
@@ -168,61 +235,9 @@ func (r *PodReconciler) fetchAndStoreDGDConfig(ctx context.Context, dgdName, dgd
 		"ttftThresholdMS", ttftThresholdMS, "ttftWindowSeconds", ttftWindowSeconds)
 }
 
-// extractInstanceIDFromLogs fetches the pod's logs and parses the instance_id
-// that the worker logs during discovery registration.
-// It tries each container in the pod since multi-container pods require
-// specifying the container name.
-func (r *PodReconciler) extractInstanceIDFromLogs(ctx context.Context, pod *corev1.Pod) (uint64, error) {
-	containers := pod.Spec.Containers
-	if len(containers) == 0 {
-		return 0, fmt.Errorf("pod has no containers")
-	}
-
-	for _, container := range containers {
-		id, err := r.extractInstanceIDFromContainerLogs(ctx, pod.Namespace, pod.Name, container.Name)
-		if err == nil {
-			return id, nil
-		}
-	}
-
-	return 0, fmt.Errorf("instance_id not found in any container logs")
-}
-
-func (r *PodReconciler) extractInstanceIDFromContainerLogs(ctx context.Context, namespace, podName, containerName string) (uint64, error) {
-	logReq := r.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
-		Container: containerName,
-	})
-	stream, err := logReq.Stream(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get log stream for container %s: %w", containerName, err)
-	}
-	defer stream.Close()
-
-	scanner := bufio.NewScanner(stream)
-	for scanner.Scan() {
-		line := ansiEscape.ReplaceAllString(scanner.Text(), "")
-		matches := instanceIDPattern.FindStringSubmatch(line)
-		if matches == nil {
-			continue
-		}
-		id, err := strconv.ParseUint(matches[1], 10, 64)
-		if err != nil {
-			continue
-		}
-		if id == 0 {
-			continue
-		}
-		return id, nil
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("error reading logs for container %s: %w", containerName, err)
-	}
-
-	return 0, fmt.Errorf("instance_id not found in container %s logs", containerName)
-}
-
 // isFrontendPod checks if a pod is a frontend pod based on naming convention
-// or the DYN_COMPONENT=frontend environment variable
+// or the DYN_COMPONENT=frontend environment variable.
+// TODO: migrate to ownership chain approach (PodClique roleName or component labels)
 func isFrontendPod(pod *corev1.Pod) bool {
 	// Check naming convention first (e.g., qwen3-{N}-0-frontend-*)
 	if strings.Contains(pod.Name, "frontend") {
@@ -240,7 +255,9 @@ func isFrontendPod(pod *corev1.Pod) bool {
 }
 
 // SetupWithManager watches Pods that have the swap-group-instance-uuid label
-// or are frontend pods (for TTFT metrics scraping)
+// or are frontend pods (for TTFT metrics scraping).
+// Also watches DynamoWorkerMetadata CRDs via Owns() so that CRD creation
+// triggers immediate re-reconciliation of the owning Pod.
 func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	isRelevantPod := predicate.NewPredicateFuncs(func(obj client.Object) bool {
 		// Match swap-group worker pods
@@ -256,6 +273,7 @@ func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Pod{}).
+		Owns(&dynamov1.DynamoWorkerMetadata{}).
 		WithEventFilter(isRelevantPod).
 		Complete(r)
 }
