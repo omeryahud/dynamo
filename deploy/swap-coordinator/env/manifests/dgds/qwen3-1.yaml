@@ -68,7 +68,7 @@ spec:
           - swap-qwen3-1
           - --swap-aware-routing
           - --swap-coordinator-url
-          - http://swap-coordinator-service.dynamo-system.svc.cluster.local:8080
+          - http://swap-coordinator-service.swap.svc.cluster.local:8080
           - --swap-coordinator-timeout
           - "1.0"
           - --register-model

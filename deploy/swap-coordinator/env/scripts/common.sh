@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 # Shared constants and helpers for build/deploy scripts.
+#
+# Node IPs/hostnames can be supplied in three ways (highest priority first):
+#   1. Positional arguments:  ./build-swap-coordinator.sh 10.0.0.1 10.0.0.2
+#   2. Environment variable:  NODES="10.0.0.1,10.0.0.2" ./build-swap-coordinator.sh
+#   3. Default list below.
 
 EXPORT_DIR="$HOME/dynamo"
-SERVERS=("gpu-node-1" "gpu-node-2" "gpu-node-3" "gpu-node-4")
+
+if [ "$#" -gt 0 ]; then
+    SERVERS=("$@")
+elif [ -n "${NODES:-}" ]; then
+    IFS=',' read -ra SERVERS <<< "$NODES"
+else
+    echo "ERROR: No target nodes specified." >&2
+    echo "Provide nodes as arguments or via the NODES env var (comma-separated)." >&2
+    exit 1
+fi
+
 NFS_MOUNT="/mnt/dynamo"
 MAX_RETRIES=5
 RETRY_DELAY=3

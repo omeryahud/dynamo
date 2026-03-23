@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-DYNAMO_IMAGE="dynamo:latest-vllm-runtime"
+DYNAMO_IMAGE="vllm-runtime:1.0.1-swap"
 
 echo "==> Building dynamo vllm runtime image..."
 cd "$REPO_ROOT"

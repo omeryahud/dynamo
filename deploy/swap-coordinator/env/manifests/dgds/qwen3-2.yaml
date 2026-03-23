@@ -25,8 +25,8 @@ spec:
           value: round-robin
       extraPodSpec:
         mainContainer:
-          image: dynamo:latest-vllm-runtime
-          imagePullPolicy: Never
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          imagePullPolicy: IfNotPresent
           name: ""
           resources: {}
           securityContext:
@@ -51,8 +51,8 @@ spec:
           runai/queue: swap
       extraPodSpec:
         mainContainer:
-          image: dynamo:latest-vllm-runtime
-          imagePullPolicy: Never
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          imagePullPolicy: IfNotPresent
           name: ""
           env:
           - name: DYN_LOG
@@ -68,7 +68,7 @@ spec:
           - swap-qwen3-2
           - --swap-aware-routing
           - --swap-coordinator-url
-          - http://swap-coordinator-service.dynamo-system.svc.cluster.local:8080
+          - http://swap-coordinator-service.swap.svc.cluster.local:8080
           - --swap-coordinator-timeout
           - "1.0"
           - --register-model
@@ -111,8 +111,8 @@ spec:
             value: "1.0"
           - name: RUNAI_SWAP_MAX_BLOCK_SIZE_MB
             value: "512"
-          image: dynamo:latest-vllm-runtime
-          imagePullPolicy: Never
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          imagePullPolicy: IfNotPresent
           name: ""
           workingDir: /workspace/
           command:

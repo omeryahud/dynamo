@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: swap-coordinator
-  namespace: dynamo-system
+  namespace: swap
   labels:
     app: swap-coordinator
 spec:

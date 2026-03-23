@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: swap-coordinator
-  namespace: dynamo-system
+  namespace: swap
   labels:
     app: swap-coordinator
 ---
