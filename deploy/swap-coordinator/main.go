@@ -10,14 +10,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	dynamov1 "github.com/ai-dynamo/dynamo/swap-coordinator/api/v1"
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/api"
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/controller"
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 )
 
 func main() {
@@ -47,7 +50,10 @@ func main() {
 	// Create runtime scheme and register core Kubernetes types
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	setupLog.Info("Registered client-go types with scheme")
+	utilruntime.Must(dynamov1.AddToScheme(scheme))
+	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(dynamov1alpha1.AddToScheme(scheme))
+	setupLog.Info("Registered types with scheme")
 
 	// Get Kubernetes configuration
 	config := ctrl.GetConfigOrDie()
@@ -55,9 +61,9 @@ func main() {
 
 	// Create controller-runtime Manager
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
-		Scheme:             scheme,
-		MetricsBindAddress: ":8082",
-		LeaderElection:     false,
+		Scheme:         scheme,
+		Metrics:        metricsserver.Options{BindAddress: ":8082"},
+		LeaderElection: false,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to create controller manager")
@@ -65,15 +71,7 @@ func main() {
 	}
 	setupLog.Info("Created controller manager", "metricsAddr", ":8081")
 
-	// Create Kubernetes clientset for pod log access
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		setupLog.Error(err, "Failed to create Kubernetes clientset")
-		os.Exit(1)
-	}
-	setupLog.Info("Created Kubernetes clientset")
-
-	// Create dynamic client for fetching DGD resources
+	// Create dynamic client for DGD annotation patching and DGD watcher
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		setupLog.Error(err, "Failed to create dynamic client")
@@ -87,11 +85,9 @@ func main() {
 
 	// Create and register the Pod reconciler
 	reconciler := &controller.PodReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Clientset:     clientset,
-		DynamicClient: dynamicClient,
-		StateManager:  stateManager,
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		StateManager: stateManager,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to setup PodReconciler")

@@ -9,13 +9,21 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
 )
+
+var dgdGVR = schema.GroupVersionResource{
+	Group:    dynamov1alpha1.GroupVersion.Group,
+	Version:  dynamov1alpha1.GroupVersion.Version,
+	Resource: "dynamographdeployments",
+}
 
 var dgdWatcherLog = ctrl.Log.WithName("dgd-watcher")
 
