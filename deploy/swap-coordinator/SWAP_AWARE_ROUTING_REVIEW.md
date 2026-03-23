@@ -2,7 +2,7 @@
 
 ## Overview
 
-This feature introduces **GPU swap-aware routing** to Dynamo's KV-cache router. The core problem: when multiple LLM models share GPUs via model swapping using Run:ai's Swap feature, the router has no awareness of which model is physically loaded ("warm") on which GPUs. This leads to unnecessary model swaps that increase model responsivene.
+This feature introduces **GPU swap-aware routing** to Dynamo's KV-cache router. The core problem: when multiple LLM models share GPUs via model swapping using Run:ai's Swap feature, the router has no awareness of which model is physically loaded ("warm") on which GPUs. This leads to unnecessary model swaps that increase model response times.
 
 The solution is a two-component architecture with a centralized SwapCoordinator making global swap decisions.
 
@@ -15,13 +15,13 @@ The solution is a two-component architecture with a centralized SwapCoordinator 
 │  per DGD         │ ◄───────────────────  │  cluster singleton     │
 └─────────────────┘                        └───────────────────────┘
      │          │                                   │
-     │          │ ① rank_workers()                  │ watches pods via
-     │          ▼   (local Rust call)               │ controller-runtime
+     │          │ ① rank_workers()                  │ watches K8s resources
+     │          ▼   (local Rust call)               │ via controller-runtime
      │   ┌────────────┐                             ▼
-     │   │ KvRouter   │                      ┌──────────────┐
-     │   │ (Rust/lib) │                      │ K8s Pod logs  │
-     │   └────────────┘                      │ DGD CRDs      │
-     │                                       └──────────────┘
+     │   │ KvRouter   │                      ┌─────────────────────────┐
+     │   │ (Rust/lib) │                      │ DynamoWorkerMetadata CRD│
+     │   └────────────┘                      │ Pod → owner chain → DGD │
+     │                                       └─────────────────────────┘
      │ ④ routes to worker
      ▼
 ┌─────────┐   Run:ai's Swap feature warms
@@ -82,10 +82,14 @@ A Kubernetes controller-runtime application with:
 
 ### Pod Controller (`pkg/controller/`)
 
-- Watches pods with `run.ai/swap-group-instance-uuid` label (Run:ai swap groups - not yet implemented)
-- Extracts `instance_id` from worker pod logs via regex (handles both structured and JSON formats, for POC purposes. A robust alternative is a requirement for production use)
+- Watches pods with `run.ai/swap-group-instance-uuid` label (Run:ai swap groups)
+- Extracts `instance_id` from the **DynamoWorkerMetadata CRD** (`spec.data` JSON blob). The CRD is created by each worker pod via server-side apply once discovery registration completes. Its existence serves as a readiness gate — workers are only registered after their CRD appears. The controller uses `.Owns(&DynamoWorkerMetadata{})` so CRD creation triggers immediate re-reconciliation of the owning pod.
+- Resolves the parent **DynamoGraphDeployment** by traversing the Kubernetes ownership chain. Three deployment paths are supported:
+  - **Grove**: Pod → PodClique → PodCliqueSet → DGD
+  - **Component (single-node)**: Pod → ReplicaSet → Deployment → DynamoComponentDeployment → DGD
+  - **Component (multinode/LWS)**: Pod → StatefulSet → LeaderWorkerSet → DynamoComponentDeployment → DGD
 - Reads DGD annotations for min/max warm worker config and TTFT thresholds
-- Also watches frontend pods for TTFT metrics scraping
+- Also watches frontend pods for TTFT metrics scraping (TODO: migrate to ownership chain approach)
 
 ### DGD Watcher (`pkg/controller/dgd_watcher.go`)
 
@@ -137,7 +141,8 @@ The `canEvict` function enforces:
 
 1. **Centralized coordinator** — a single SwapCoordinator makes global swap decisions, avoiding race conditions where multiple routers independently decide to warm conflicting models on the same GPUs.
 2. **Annotations as config** — DGD min/max warm workers are stored as Kubernetes annotations, making them editable via `kubectl` or the dashboard without redeployment.
-3. **Log-based instance ID extraction** — extracts the Dynamo `instance_id` from pod logs rather than requiring a registration protocol. Pragmatic for a POC, though fragile for production.
-4. **Direct frontend scraping** — scrapes TTFT metrics directly from frontend pod `/metrics` endpoints rather than going through Prometheus, reducing latency for auto-scaling decisions. Pragmatic for a POC, though fragile for production.
-5. **Reject-on-zero-max** — when `max_warm_workers=0`, the coordinator returns 403, causing the router to reject the request entirely. This enables scale-to-zero per model.
+3. **DynamoWorkerMetadata CRD for instance ID** — reads `instance_id` from the DynamoWorkerMetadata CRD that workers create via server-side apply during discovery registration. This replaces the earlier POC approach of parsing `instance_id` from pod logs via regex. The CRD also acts as a readiness signal — workers are only registered after their CRD exists.
+4. **Ownership chain for DGD resolution** — determines which DynamoGraphDeployment a worker belongs to by traversing the Kubernetes ownerReferences chain (Pod → ... → DGD), supporting Grove, Deployment, and LeaderWorkerSet paths. This replaces the earlier approach of reading DGD names from pod labels.
+5. **Direct frontend scraping** — scrapes TTFT metrics directly from frontend pod `/metrics` endpoints rather than going through Prometheus, reducing latency for auto-scaling decisions. Pragmatic for a POC, though fragile for production.
+6. **Reject-on-zero-max** — when `max_warm_workers=0`, the coordinator returns 403, causing the router to reject the request entirely. This enables scale-to-zero per model.
 

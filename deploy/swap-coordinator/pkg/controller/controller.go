@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	dynamov1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	dynamov1 "github.com/ai-dynamo/dynamo/swap-coordinator/api/v1"
@@ -140,15 +142,29 @@ func (r *PodReconciler) extractInstanceIDFromDWM(ctx context.Context, namespace,
 }
 
 // resolveDGDFromOwnerChain traverses the Kubernetes ownership chain from a Pod
-// up to the DynamoGraphDeployment: Pod → PodClique → PodCliqueSet → DGD.
+// up to the DynamoGraphDeployment. Supports three deployment paths:
+//
+//	Grove path:          Pod → PodClique → PodCliqueSet → DynamoGraphDeployment
+//	Component path:      Pod → ReplicaSet → Deployment → DynamoComponentDeployment → DynamoGraphDeployment
+//	Component LWS path:  Pod → StatefulSet → LeaderWorkerSet → DynamoComponentDeployment → DynamoGraphDeployment
+//
 // Returns the DGD name and namespace, or empty strings if the chain cannot be resolved.
 func (r *PodReconciler) resolveDGDFromOwnerChain(ctx context.Context, pod *corev1.Pod) (string, string) {
+	if name, ns := r.resolveDGDViaGrove(ctx, pod); name != "" {
+		return name, ns
+	}
+	if name, ns := r.resolveDGDViaComponent(ctx, pod); name != "" {
+		return name, ns
+	}
+	return r.resolveDGDViaLWS(ctx, pod)
+}
+
+// resolveDGDViaGrove tries: Pod → PodClique → PodCliqueSet → DGD
+func (r *PodReconciler) resolveDGDViaGrove(ctx context.Context, pod *corev1.Pod) (string, string) {
 	logger := log.FromContext(ctx)
 
-	// Step 1: Pod → PodClique
 	pcOwner := findOwnerRef(pod.OwnerReferences, "PodClique")
 	if pcOwner == nil {
-		logger.V(1).Info("Pod has no PodClique owner", "podName", pod.Name)
 		return "", ""
 	}
 
@@ -158,10 +174,8 @@ func (r *PodReconciler) resolveDGDFromOwnerChain(ctx context.Context, pod *corev
 		return "", ""
 	}
 
-	// Step 2: PodClique → PodCliqueSet
 	pcsOwner := findOwnerRef(pc.OwnerReferences, "PodCliqueSet")
 	if pcsOwner == nil {
-		logger.V(1).Info("PodClique has no PodCliqueSet owner", "podClique", pcOwner.Name)
 		return "", ""
 	}
 
@@ -171,10 +185,98 @@ func (r *PodReconciler) resolveDGDFromOwnerChain(ctx context.Context, pod *corev
 		return "", ""
 	}
 
-	// Step 3: PodCliqueSet → DynamoGraphDeployment
 	dgdOwner := findOwnerRef(pcs.OwnerReferences, "DynamoGraphDeployment")
 	if dgdOwner == nil {
-		logger.V(1).Info("PodCliqueSet has no DynamoGraphDeployment owner", "podCliqueSet", pcsOwner.Name)
+		return "", ""
+	}
+
+	return dgdOwner.Name, pod.Namespace
+}
+
+// resolveDGDViaComponent tries: Pod → ReplicaSet → Deployment → DynamoComponentDeployment → DGD
+func (r *PodReconciler) resolveDGDViaComponent(ctx context.Context, pod *corev1.Pod) (string, string) {
+	logger := log.FromContext(ctx)
+
+	rsOwner := findOwnerRef(pod.OwnerReferences, "ReplicaSet")
+	if rsOwner == nil {
+		return "", ""
+	}
+
+	var rs appsv1.ReplicaSet
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: rsOwner.Name}, &rs); err != nil {
+		logger.V(1).Info("Failed to get ReplicaSet", "name", rsOwner.Name, "error", err)
+		return "", ""
+	}
+
+	deplOwner := findOwnerRef(rs.OwnerReferences, "Deployment")
+	if deplOwner == nil {
+		return "", ""
+	}
+
+	var depl appsv1.Deployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: deplOwner.Name}, &depl); err != nil {
+		logger.V(1).Info("Failed to get Deployment", "name", deplOwner.Name, "error", err)
+		return "", ""
+	}
+
+	dcdOwner := findOwnerRef(depl.OwnerReferences, "DynamoComponentDeployment")
+	if dcdOwner == nil {
+		return "", ""
+	}
+
+	var dcd dynamov1alpha1.DynamoComponentDeployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: dcdOwner.Name}, &dcd); err != nil {
+		logger.V(1).Info("Failed to get DynamoComponentDeployment", "name", dcdOwner.Name, "error", err)
+		return "", ""
+	}
+
+	dgdOwner := findOwnerRef(dcd.OwnerReferences, "DynamoGraphDeployment")
+	if dgdOwner == nil {
+		return "", ""
+	}
+
+	return dgdOwner.Name, pod.Namespace
+}
+
+// resolveDGDViaLWS tries: Pod → StatefulSet → LeaderWorkerSet → DynamoComponentDeployment → DGD
+func (r *PodReconciler) resolveDGDViaLWS(ctx context.Context, pod *corev1.Pod) (string, string) {
+	logger := log.FromContext(ctx)
+
+	stsOwner := findOwnerRef(pod.OwnerReferences, "StatefulSet")
+	if stsOwner == nil {
+		return "", ""
+	}
+
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: stsOwner.Name}, &sts); err != nil {
+		logger.V(1).Info("Failed to get StatefulSet", "name", stsOwner.Name, "error", err)
+		return "", ""
+	}
+
+	lwsOwner := findOwnerRef(sts.OwnerReferences, "LeaderWorkerSet")
+	if lwsOwner == nil {
+		return "", ""
+	}
+
+	var lws leaderworkersetv1.LeaderWorkerSet
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: lwsOwner.Name}, &lws); err != nil {
+		logger.V(1).Info("Failed to get LeaderWorkerSet", "name", lwsOwner.Name, "error", err)
+		return "", ""
+	}
+
+	dcdOwner := findOwnerRef(lws.OwnerReferences, "DynamoComponentDeployment")
+	if dcdOwner == nil {
+		return "", ""
+	}
+
+	var dcd dynamov1alpha1.DynamoComponentDeployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: dcdOwner.Name}, &dcd); err != nil {
+		logger.V(1).Info("Failed to get DynamoComponentDeployment", "name", dcdOwner.Name, "error", err)
+		return "", ""
+	}
+
+	dgdOwner := findOwnerRef(dcd.OwnerReferences, "DynamoGraphDeployment")
+	if dgdOwner == nil {
 		return "", ""
 	}
 

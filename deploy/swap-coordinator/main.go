@@ -21,6 +21,7 @@ import (
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/controller"
 	"github.com/ai-dynamo/dynamo/swap-coordinator/pkg/state"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
 func main() {
@@ -53,6 +54,7 @@ func main() {
 	utilruntime.Must(dynamov1.AddToScheme(scheme))
 	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(dynamov1alpha1.AddToScheme(scheme))
+	utilruntime.Must(leaderworkersetv1.AddToScheme(scheme))
 	setupLog.Info("Registered types with scheme")
 
 	// Get Kubernetes configuration

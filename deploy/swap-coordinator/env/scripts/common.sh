@@ -22,6 +22,9 @@ NFS_MOUNT="/mnt/dynamo"
 MAX_RETRIES=5
 RETRY_DELAY=3
 REPO_ROOT=~/go/src/github.com/omeryahud/dynamo
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/runai-dev.pem}"
+SSH_USER="${SSH_USER:-ec2-user}"
+SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no -l $SSH_USER"
 
 # Import an image on a remote server, retrying until it verifies present.
 # Args: $1=server, $2=tar filename, $3=expected image ref (e.g. docker.io/library/swap-coordinator:latest)
@@ -34,10 +37,10 @@ import_on_server() {
 
     for attempt in $(seq 1 "$MAX_RETRIES"); do
         echo "$log_prefix Attempt $attempt/$MAX_RETRIES: importing..."
-        ssh "$server" "sudo ctr --namespace k8s.io images import $nfs_path" 2>&1 || true
+        ssh $SSH_OPTS "$server" "cat $nfs_path | sudo ctr --namespace k8s.io images import -" 2>&1 || true
 
         # Verify the image is actually present
-        if ssh "$server" "sudo ctr --namespace k8s.io images ls -q 2>/dev/null | grep -qF '$expected_ref'"; then
+        if ssh $SSH_OPTS "$server" "sudo ctr --namespace k8s.io images ls -q 2>/dev/null | grep -qF '$expected_ref'"; then
             echo "$log_prefix Verified image present."
             return 0
         fi
@@ -62,6 +65,7 @@ build_save_deploy() {
 
     echo "==> Saving $image to $tar_path..."
     docker save "$image" -o "$tar_path"
+    chmod 644 "$tar_path"
     echo "==> Save complete ($(du -sh "$tar_path" | cut -f1))"
 
     local pids=()

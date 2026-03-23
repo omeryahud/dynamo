@@ -18,6 +18,7 @@ spec:
       extraPodMetadata:
         labels:
           runai/queue: swap
+          swap-coordinator/frontend: qwen3-1
       replicas: 1
       envs:
         # Route requests to the Router (swap_aware_router), not directly to workers
@@ -51,12 +52,12 @@ spec:
           runai/queue: swap
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: vllm-runtime:1.0.1-swap
           imagePullPolicy: IfNotPresent
           name: ""
           env:
           - name: DYN_LOG
-            value: "info,dynamo.swap_aware_router=debug"
+            value: "debug,dynamo.swap_aware_router=debug"
           command:
           - python3
           - -m
@@ -150,6 +151,22 @@ spec:
         - effect: NoSchedule
           key: nvidia.com/gpu
           operator: Exists
-        volumes:                                                                                                                                                        
-        - emptyDir: {}                                                                                                                                                  
+        volumes:
+        - emptyDir: {}
           name: triton-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen3-1-frontend-nodeport
+  namespace: swap
+spec:
+  type: NodePort
+  selector:
+    swap-coordinator/frontend: qwen3-1
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    nodePort: 30081
+    protocol: TCP

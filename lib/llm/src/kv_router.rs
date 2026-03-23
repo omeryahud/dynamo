@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+pub use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::{
     ConcurrentRadixTree, ThreadPoolIndexer,
     approx::PruneConfig,
-    config::{KvRouterConfig, RouterConfigOverride},
     indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
     protocols::KV_EVENT_SUBJECT,
     protocols::{
@@ -54,7 +54,7 @@ use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::{
         remote_indexer::RemoteIndexer,
-        scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, RankedWorker, SchedulingRequest},
+        scheduler::{KvScheduler, PotentialLoad, RankedWorker},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,

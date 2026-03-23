@@ -39,10 +39,30 @@ rules:
   - list
   - watch
 - apiGroups:
+  - nvidia.com
+  resources:
+  - dynamocomponentdeployments
+  verbs:
+  - get
+- apiGroups:
   - grove.io
   resources:
   - podcliques
   - podcliquesets
+  verbs:
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+- apiGroups:
+  - leaderworkerset.x-k8s.io
+  resources:
+  - leaderworkersets
   verbs:
   - get
 ---
@@ -59,4 +79,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: swap-coordinator
-  namespace: dynamo-system
+  namespace: swap

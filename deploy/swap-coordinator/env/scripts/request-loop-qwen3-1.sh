@@ -4,7 +4,7 @@
 set -euo pipefail
 
 MODEL="Qwen/Qwen3-0.6B"
-URL="http://ec2-3-238-76-242.compute-1.amazonaws.com:30701/v1/chat/completions"
+URL="http://ec2-100-54-75-241.compute-1.amazonaws.com:30081/v1/chat/completions"
 FOLLOWUPS=20
 
 rand_str() { head -c "$1" /dev/urandom | base64 | tr -dc 'a-zA-Z0-9 ' | head -c "$1"; }
@@ -20,7 +20,7 @@ while true; do
     curl -s --max-time 30 "$URL" \
       -H 'Content-Type: application/json' \
       -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":10}" \
-      | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'][:60])" 2>/dev/null \
+      | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'][:60])" \
       || echo "FAILED"
   done
   echo "[qwen3-1] Conversation done, starting new one..."
