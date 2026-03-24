@@ -83,12 +83,19 @@ spec:
             capabilities:
               drop:
               - ALL
-        nodeSelector:                                                                                                                                                   
+          volumeMounts:
+          - name: swap-router-code
+            mountPath: /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/swap_aware_router
+        nodeSelector:
           run.ai/swap-enabled: 'true'
         schedulerName: runai-scheduler
         securityContext:
           seccompProfile:
             type: RuntimeDefault
+        volumes:
+        - name: swap-router-code
+          configMap:
+            name: swap-router-code
 
     vLLMWorker:
       labels:
