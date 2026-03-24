@@ -68,6 +68,9 @@ func (s *Server) registerRoutes() {
 	s.router.GET("/dgds", DGDsHandler(s.stateManager))
 	s.router.PUT("/dgds", UpdateDGDHandler(s.stateManager, s.dynamicClient))
 
+	// Debug endpoints
+	s.router.GET("/debug/workers", DebugWorkersHandler(s.stateManager))
+
 	// Worker selection endpoint
 	s.router.POST("/select_worker", SelectWorkerHandler(s.stateManager))
 }

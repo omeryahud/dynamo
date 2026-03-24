@@ -52,6 +52,39 @@ func StateHandler(stateManager *state.Manager) gin.HandlerFunc {
 	}
 }
 
+// DebugWorkersHandler handles GET /debug/workers requests
+// Returns full worker metadata for debugging
+func DebugWorkersHandler(stateManager *state.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		workers := stateManager.ListWorkers()
+
+		type debugWorker struct {
+			InstanceID            uint64 `json:"instance_id"`
+			SwapGroupInstanceUUID string `json:"swap_group_instance_uuid"`
+			PodName               string `json:"pod_name"`
+			Namespace             string `json:"namespace"`
+			DGDName               string `json:"dgd_name"`
+			DGDNamespace          string `json:"dgd_namespace"`
+			LastSeenAt            string `json:"last_seen_at"`
+		}
+
+		result := make([]debugWorker, 0, len(workers))
+		for _, w := range workers {
+			result = append(result, debugWorker{
+				InstanceID:            w.InstanceID,
+				SwapGroupInstanceUUID: w.SwapGroupInstanceUUID,
+				PodName:               w.PodName,
+				Namespace:             w.Namespace,
+				DGDName:               w.DGDName,
+				DGDNamespace:          w.DGDNamespace,
+				LastSeenAt:            w.LastSeenAt.Format("2006-01-02T15:04:05Z"),
+			})
+		}
+
+		c.IndentedJSON(http.StatusOK, result)
+	}
+}
+
 // DashboardHandler serves the visualization HTML page
 func DashboardHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -516,15 +549,17 @@ func SelectWorkerHandler(stateManager *state.Manager) gin.HandlerFunc {
 				}
 			}
 
-			logger.Info("No warm match, selected fallback",
-				"reason", reason,
-				"instanceID", selected.InstanceID,
-				"dpRank", selected.DPRank,
-				"swapGroup", selectedSwapGroupUUID,
-				"dgdName", dgdName,
-				"warmCount", warmCount,
-				"minWarm", minWarm,
-				"maxWarm", maxWarm)
+			if selected != nil {
+				logger.Info("No warm match, selected fallback",
+					"reason", reason,
+					"instanceID", selected.InstanceID,
+					"dpRank", selected.DPRank,
+					"swapGroup", selectedSwapGroupUUID,
+					"dgdName", dgdName,
+					"warmCount", warmCount,
+					"minWarm", minWarm,
+					"maxWarm", maxWarm)
+			}
 		}
 
 		if selected == nil {

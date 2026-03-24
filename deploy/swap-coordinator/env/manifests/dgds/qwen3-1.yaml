@@ -21,12 +21,14 @@ spec:
           swap-coordinator/frontend: qwen3-1
       replicas: 1
       envs:
-        # Route requests to the Router (swap_aware_router), not directly to workers
         - name: DYN_ROUTER_MODE
           value: round-robin
+        # Restrict frontend discovery to the router's namespace only
+        - name: DYN_NAMESPACE_PREFIX
+          value: "swap-qwen3-1-router"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: vllm-runtime:1.0.1-swap
           imagePullPolicy: IfNotPresent
           name: ""
           resources: {}
@@ -64,9 +66,9 @@ spec:
           - dynamo.swap_aware_router
           args:
           - --endpoint
-          - swap-qwen3-1.backend.generate
+          - swap-qwen3-1-d5eaa276.backend.generate
           - --router-namespace
-          - swap-qwen3-1
+          - swap-qwen3-1-router
           - --swap-aware-routing
           - --swap-coordinator-url
           - http://swap-coordinator-service.swap.svc.cluster.local:8080
@@ -119,7 +121,7 @@ spec:
             value: "1.0"
           - name: RUNAI_SWAP_MAX_BLOCK_SIZE_MB
             value: "512"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: vllm-runtime:1.0.1-swap
           imagePullPolicy: IfNotPresent
           name: ""
           workingDir: /workspace/
