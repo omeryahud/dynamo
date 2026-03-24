@@ -77,6 +77,8 @@ class FrontendConfig(KvRouterConfigBase):
     enable_streaming_reasoning_dispatch: bool
     preprocess_workers: int
     tokenizer_backend: str
+    swap_coordinator_url: Optional[str]
+    swap_coordinator_timeout: float
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
@@ -445,4 +447,23 @@ class FrontendArgGroup(ArgGroup):
                 "Decoding always uses HuggingFace. Has no effect on TikToken models."
             ),
             choices=["default", "fastokens"],
+        )
+
+        add_argument(
+            g,
+            flag_name="--swap-coordinator-url",
+            env_var="DYN_SWAP_COORDINATOR_URL",
+            default=None,
+            help=(
+                "SwapCoordinator service URL (e.g., http://swap-coordinator-service:8080). "
+                "Enables swap-aware routing when set. Requires --router-mode=kv."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--swap-coordinator-timeout",
+            env_var="DYN_SWAP_COORDINATOR_TIMEOUT",
+            default=1.0,
+            help="Timeout in seconds for SwapCoordinator API calls.",
+            arg_type=float,
         )

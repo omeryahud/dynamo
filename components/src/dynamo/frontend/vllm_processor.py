@@ -37,6 +37,7 @@ from dynamo.llm import (
 from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .swap_routing import SwapAwareRouter, create_swap_router
 from .utils import random_uuid
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        swap_router: SwapAwareRouter | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -85,6 +87,8 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
+        self.swap_router = swap_router
+        self.swap_aware_routing_enabled = swap_router is not None
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -281,7 +285,18 @@ class VllmProcessor:
         self.output_processor.add_request(vllm_preproc, None)
 
         try:
-            if self.is_kv_router:
+            if self.swap_aware_routing_enabled:
+                worker_id, dp_rank = await self.swap_router.select_worker(tokens)
+                dynamo_stream = await self.router.generate(
+                    token_ids=tokens,
+                    model=dynamo_preproc["model"],
+                    stop_conditions=dynamo_preproc["stop_conditions"],
+                    sampling_options=dynamo_preproc["sampling_options"],
+                    output_options=dynamo_preproc["output_options"],
+                    worker_id=worker_id,
+                    dp_rank=dp_rank,
+                )
+            elif self.is_kv_router:
                 dynamo_stream = await self.router.generate(
                     token_ids=tokens,
                     model=dynamo_preproc["model"],
@@ -464,6 +479,12 @@ class EngineFactory:
                 router_mode=self.router_config.router_mode
             )
 
+        swap_router = create_swap_router(
+            router,
+            self.config.swap_coordinator_url,
+            self.config.swap_coordinator_timeout,
+        )
+
         gen = VllmProcessor(
             tokenizer,
             input_processor,
@@ -471,6 +492,7 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            swap_router=swap_router,
         )
 
         return PythonAsyncEngine(gen.generator, loop)

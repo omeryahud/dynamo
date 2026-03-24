@@ -21,62 +21,17 @@ spec:
           swap-coordinator/frontend: qwen3-3
       replicas: 1
       envs:
-        # Route requests to the Router (swap_aware_router), not directly to workers
         - name: DYN_ROUTER_MODE
-          value: round-robin
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
-          imagePullPolicy: IfNotPresent
-          name: ""
-          resources: {}
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-              - ALL
-        nodeSelector:
-          run.ai/swap-enabled: 'true'
-        schedulerName: runai-scheduler
-        securityContext:
-          seccompProfile:
-            type: RuntimeDefault
-
-    Router:
-      labels:
-        runai/queue: swap
-      componentType: router
-      replicas: 1
-      extraPodMetadata:
-        labels:
-          runai/queue: swap
+          value: kv
+        - name: DYN_SWAP_COORDINATOR_URL
+          value: "http://swap-coordinator-service.swap.svc.cluster.local:8080"
+        - name: DYN_SWAP_COORDINATOR_TIMEOUT
+          value: "1.0"
       extraPodSpec:
         mainContainer:
           image: vllm-runtime:1.0.1-swap
           imagePullPolicy: IfNotPresent
           name: ""
-          env:
-          - name: DYN_LOG
-            value: "info,dynamo.swap_aware_router=debug"
-          command:
-          - python3
-          - -m
-          - dynamo.swap_aware_router
-          args:
-          - --endpoint
-          - swap-qwen3-3.backend.generate
-          - --router-namespace
-          - swap-qwen3-3
-          - --swap-aware-routing
-          - --swap-coordinator-url
-          - http://swap-coordinator-service.swap.svc.cluster.local:8080
-          - --swap-coordinator-timeout
-          - "1.0"
-          - --register-model
-          - --model-name
-          - Qwen/Qwen3-0.6B
-          - --block-size
-          - "16"
           resources: {}
           securityContext:
             allowPrivilegeEscalation: false
@@ -84,8 +39,18 @@ spec:
               drop:
               - ALL
           volumeMounts:
-          - name: swap-router-code
-            mountPath: /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/swap_aware_router
+          - name: swap-frontend-code
+            mountPath: /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/frontend/frontend_args.py
+            subPath: frontend_args.py
+          - name: swap-frontend-code
+            mountPath: /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/frontend/vllm_processor.py
+            subPath: vllm_processor.py
+          - name: swap-frontend-code
+            mountPath: /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/frontend/swap_routing.py
+            subPath: swap_routing.py
+          - name: swap-frontend-code
+            mountPath: /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/frontend/sglang_processor.py
+            subPath: sglang_processor.py
         nodeSelector:
           run.ai/swap-enabled: 'true'
         schedulerName: runai-scheduler
@@ -93,9 +58,9 @@ spec:
           seccompProfile:
             type: RuntimeDefault
         volumes:
-        - name: swap-router-code
+        - name: swap-frontend-code
           configMap:
-            name: swap-router-code
+            name: swap-frontend-code
 
     vLLMWorker:
       labels:
@@ -107,7 +72,7 @@ spec:
         labels:
           runai/queue: swap
           model: qwen3-3
-        annotations:  
+        annotations:
           gpu-fraction: "0.3"
           gpu-fraction-num-devices: "3"
       extraPodSpec:
@@ -119,7 +84,7 @@ spec:
             value: "1.0"
           - name: RUNAI_SWAP_MAX_BLOCK_SIZE_MB
             value: "512"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          image: vllm-runtime:1.0.1-swap
           imagePullPolicy: IfNotPresent
           name: ""
           workingDir: /workspace/
@@ -131,7 +96,7 @@ spec:
           - --model
           - Qwen/Qwen3-0.6B
           - --served-model-name
-          - Qwen/Qwen3-0.6B-worker
+          - Qwen/Qwen3-0.6B
           - --kv-events-config 
           - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:20080"}'
           - --block-size

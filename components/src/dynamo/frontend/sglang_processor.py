@@ -35,6 +35,7 @@ from .sglang_prepost import (
     create_parsers,
     preprocess_chat_request,
 )
+from .swap_routing import SwapAwareRouter, create_swap_router
 from .utils import PreprocessError, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,7 @@ class SglangProcessor:
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
         stream_interval: int = 1,
+        swap_router: SwapAwareRouter | None = None,
     ):
         self.tokenizer = tokenizer
         self.router = router
@@ -222,6 +224,8 @@ class SglangProcessor:
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
         self.preprocess_pool = preprocess_pool
+        self.swap_router = swap_router
+        self.swap_aware_routing_enabled = swap_router is not None
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
                 preprocess_workers + 2
@@ -389,7 +393,18 @@ class SglangProcessor:
         stream_interval = self.stream_interval
 
         try:
-            if self.is_kv_router:
+            if self.swap_aware_routing_enabled:
+                worker_id, dp_rank = await self.swap_router.select_worker(tokens)
+                dynamo_stream = await self.router.generate(
+                    token_ids=tokens,
+                    model=dynamo_preproc["model"],
+                    stop_conditions=dynamo_preproc["stop_conditions"],
+                    sampling_options=dynamo_preproc["sampling_options"],
+                    output_options=dynamo_preproc["output_options"],
+                    worker_id=worker_id,
+                    dp_rank=dp_rank,
+                )
+            elif self.is_kv_router:
                 dynamo_stream = await self.router.generate(
                     token_ids=tokens,
                     model=dynamo_preproc["model"],
@@ -601,6 +616,12 @@ class SglangEngineFactory:
 
         logger.info("SGLang processor stream_interval=%d", self.stream_interval)
 
+        swap_router = create_swap_router(
+            router,
+            self.config.swap_coordinator_url,
+            self.config.swap_coordinator_timeout,
+        )
+
         gen = SglangProcessor(
             tokenizer,
             router,
@@ -611,6 +632,7 @@ class SglangEngineFactory:
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
             stream_interval=self.stream_interval,
+            swap_router=swap_router,
         )
 
         return PythonAsyncEngine(gen.generator, loop)
