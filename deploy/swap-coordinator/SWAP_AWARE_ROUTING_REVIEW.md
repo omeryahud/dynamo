@@ -6,12 +6,6 @@ This feature introduces **GPU swap-aware routing** to Dynamo's KV-cache router. 
 
 The solution is a two-component architecture with a centralized SwapCoordinator making global swap decisions.
 
-## Branch Info
-
-- **Branch:** `omeryahud/swap-aware-router`
-- **Commits:** 23 (from `a1e7bcb95` to `09c8600d6`)
-- **Scope:** ~65,866 lines added across 246 files
-
 ## Architecture
 
 ```
@@ -147,3 +141,13 @@ The `canEvict` function enforces:
 4. **Direct frontend scraping** — scrapes TTFT metrics directly from frontend pod `/metrics` endpoints rather than going through Prometheus, reducing latency for auto-scaling decisions. Pragmatic for a POC, though fragile for production.
 5. **Reject-on-zero-max** — when `max_warm_workers=0`, the coordinator returns 403, causing the router to reject the request entirely. This enables scale-to-zero per model.
 
+---
+
+## Dynamo changes to take into consideration
+Dynamo very recently released version 1.0.1, which introduced major changes to their kubernetes-based worker discovery.
+A new API resource was introduced, DynamoWorkerMetadata, which contains worker discovery data such as:
+- Pod name
+- Worker instance ID
+- GRPC endpoint
+
+Those data points could be very helpful and should be used instead of the current POC implementation that relies on the Pod watcher, and log-based worker discovery.
